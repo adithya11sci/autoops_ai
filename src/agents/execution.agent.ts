@@ -37,17 +37,21 @@ async function simulateAction(step: PlanStep): Promise<{ success: boolean; outpu
         };
     }
 
+    // Resolve service name from various possible parameter keys the LLM might use
+    const svc = step.parameters.service || step.parameters.deploymentName || step.parameters.name || step.parameters.target || "target-service";
+    const replicas = step.parameters.replicas || step.parameters.replicaCount || 3;
+
     const outputs: Record<string, string> = {
-        restart_service: `Service ${step.parameters.service} restarted successfully. All pods healthy.`,
-        scale_deployment: `Deployment ${step.parameters.service} scaled to ${step.parameters.replicas} replicas.`,
-        rolling_restart: `Rolling restart of ${step.parameters.service} completed. 0 downtime.`,
-        rollback_deployment: `Deployment ${step.parameters.service} rolled back to previous revision.`,
-        update_resource_limits: `Resource limits updated for ${step.parameters.service}. Memory: ${step.parameters.memoryLimit || "N/A"}.`,
-        clear_disk_space: `Cleared ${step.parameters.freeSpaceGB || 10}GB of disk space on ${step.parameters.service}.`,
-        flush_connection_pool: `Connection pool for ${step.parameters.service} flushed. Active connections reset.`,
-        apply_config: `Configuration applied to ${step.parameters.service}.`,
-        verify_health: `Health check passed for ${step.parameters.service}: HTTP 200 OK.`,
-        trigger_pipeline: `CI/CD pipeline triggered for ${step.parameters.service}.`,
+        restart_service: `Service ${svc} restarted successfully. All pods healthy.`,
+        scale_deployment: `Deployment ${svc} scaled to ${replicas} replicas.`,
+        rolling_restart: `Rolling restart of ${svc} completed. 0 downtime.`,
+        rollback_deployment: `Deployment ${svc} rolled back to previous revision.`,
+        update_resource_limits: `Resource limits updated for ${svc}. Memory: ${step.parameters.memoryLimit || step.parameters.memory || "N/A"}.`,
+        clear_disk_space: `Cleared ${step.parameters.freeSpaceGB || 10}GB of disk space on ${svc}.`,
+        flush_connection_pool: `Connection pool for ${svc} flushed. Active connections reset.`,
+        apply_config: `Configuration applied to ${svc}.`,
+        verify_health: `Health check passed for ${svc}: HTTP 200 OK.`,
+        trigger_pipeline: `CI/CD pipeline triggered for ${svc}.`,
     };
 
     return {
