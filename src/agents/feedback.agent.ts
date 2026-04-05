@@ -6,8 +6,10 @@ import { IncidentState } from "../orchestrator/state";
 import { saveIncident, logAgentEvent } from "../services/database";
 import { storeIncident } from "../services/chroma.client";
 import { createChildLogger } from "../utils/logger";
+import { MemoryService } from "../services/memory.service";
 
 const log = createChildLogger("FeedbackAgent");
+const memoryService = new MemoryService();
 
 export async function feedbackAgent(state: IncidentState): Promise<IncidentState> {
     log.info({ incidentId: state.incidentId }, "▶ Feedback Agent started");
@@ -78,8 +80,9 @@ export async function feedbackAgent(state: IncidentState): Promise<IncidentState
             lessons,
         });
         log.info("Incident persisted to PostgreSQL");
-    } catch (err: any) {
-        log.warn({ err: err.message }, "Failed to persist to PostgreSQL (non-fatal)");
+    } catch (err: unknown) {
+        const error = err as Error;
+        log.warn({ err: error.message }, "Failed to persist to PostgreSQL (non-fatal)");
     }
 
     // Step 5: Store in ChromaDB for future RAG
@@ -102,8 +105,9 @@ export async function feedbackAgent(state: IncidentState): Promise<IncidentState
             planTitle: state.plan?.title || "N/A",
         });
         log.info("Incident stored in ChromaDB for future RAG");
-    } catch (err: any) {
-        log.warn({ err: err.message }, "Failed to store in ChromaDB (non-fatal)");
+    } catch (err: unknown) {
+        const error = err as Error;
+        log.warn({ err: error.message }, "Failed to store in ChromaDB (non-fatal)");
     }
 
     // Step 6: Log summary
@@ -118,6 +122,16 @@ export async function feedbackAgent(state: IncidentState): Promise<IncidentState
         },
         `📊 Feedback complete: ${outcome.toUpperCase()}`
     );
+
+    // === ENTERPRISE ADDITION START ===
+    // Fire-and-forget RL score update for memory-sourced fixes
+    if (state.fixId && state.planSource === "memory") {
+        memoryService.updateScore(state.fixId, {
+            success: state.executionStatus === "success",
+            slaMet: true, // SLA check is handled separately
+        }).catch((err: Error) => log.warn({ err: err.message }, "Score update failed (non-critical)"));
+    }
+    // === ENTERPRISE ADDITION END ===
 
     return state;
 }

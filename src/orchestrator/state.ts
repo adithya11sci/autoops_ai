@@ -3,6 +3,7 @@
  * Central state flowing through the multi-agent workflow.
  */
 import { v4 as uuidv4 } from "uuid";
+import { MemoryResult, RiskAssessment, DecisionResult } from "../services/enterprise-types";
 
 export interface RawEvent {
     eventId: string;
@@ -100,6 +101,15 @@ export interface IncidentState {
     currentAgent: string;
     workflowStatus: WorkflowStatus;
     errorLog: Array<{ agent: string; error: string; timestamp: string }>;
+    // === ENTERPRISE FIELDS (optional, additive only) ===
+    planSource?: "template" | "memory" | "llm" | "unavailable";
+    memorySimilarity?: number;
+    memoryResult?: MemoryResult;
+    fixId?: string | null;
+    riskAssessment?: RiskAssessment;
+    approvalId?: string;
+    groqFailed?: boolean;
+    decisionResult?: DecisionResult;
 }
 
 export function createIncidentState(rawEvents: RawEvent[]): IncidentState {

@@ -4,7 +4,7 @@
  * Central orchestrator that connects all 6 agents in a stateful workflow
  * with conditional branching, retry logic, and escalation.
  *
- * Flow: Monitoring → RCA → Planning → SLA → Execution → Feedback
+ * Flow: Monitoring → RCA → Planning → SLA → Decision → Execution → Feedback
  *       └───── retry (on failure, up to maxRetries) ─────┘
  */
 import { IncidentState, createIncidentState, RawEvent } from "./state";
@@ -16,8 +16,19 @@ import { executionAgent } from "../agents/execution.agent";
 import { feedbackAgent } from "../agents/feedback.agent";
 import { logAgentEvent } from "../services/database";
 import { createChildLogger } from "../utils/logger";
+// === ENTERPRISE ADDITION: Decision Engine ===
+import { DecisionEngine } from "../engines/decision.engine";
+import { CommandValidatorService } from "../services/command-validator.service";
+import { RiskService } from "../services/risk.service";
+import { ApprovalService } from "../services/approval.service";
 
 const log = createChildLogger("Orchestrator");
+
+// Instantiate enterprise services
+const commandValidator = new CommandValidatorService();
+const riskService = new RiskService();
+const approvalService = new ApprovalService();
+const decisionEngine = new DecisionEngine(commandValidator, riskService, approvalService);
 
 // Store active incidents for API queries
 const activeIncidents = new Map<string, IncidentState>();
@@ -81,7 +92,7 @@ export async function runPipeline(rawEvents: RawEvent[]): Promise<IncidentState>
         notifyListeners(state);
 
         // ──────────────────────────────────────────────────
-        // STEPS 3-5: Planning → SLA → Execution (with retry loop)
+        // STEPS 3-6: Planning → SLA → Decision → Execution (with retry loop)
         // ──────────────────────────────────────────────────
         let resolved = false;
 
@@ -93,6 +104,45 @@ export async function runPipeline(rawEvents: RawEvent[]): Promise<IncidentState>
             // STEP 4: SLA Agent — Assign priority
             await runAgent("sla", slaAgent, state);
             notifyListeners(state);
+
+            // === ENTERPRISE ADDITION: STEP 4.5 — Decision Engine ===
+            // Runs between planning/SLA and execution.
+            // Validates commands, assesses risk, routes to approval if needed.
+            try {
+                const decisionResult = await decisionEngine.decide(state);
+                state.decisionResult = decisionResult;
+                notifyListeners(state);
+
+                if (decisionResult.action === "block" || decisionResult.action === "escalate_human") {
+                    log.warn(
+                        {
+                            incidentId: state.incidentId,
+                            action: decisionResult.action,
+                            reason: decisionResult.reason,
+                        },
+                        `🚫 Decision: ${decisionResult.action.toUpperCase()} — ${decisionResult.reason}`
+                    );
+                    state.workflowStatus = "escalated";
+                    state.outcome = "escalated";
+                    break; // Skip execution, go to feedback
+                }
+
+                log.info(
+                    {
+                        incidentId: state.incidentId,
+                        action: decisionResult.action,
+                        reason: decisionResult.reason,
+                    },
+                    `✅ Decision: ${decisionResult.action.toUpperCase()}`
+                );
+            } catch (err: unknown) {
+                const error = err as Error;
+                log.error({ err: error.message }, "Decision engine failed — blocking for safety");
+                state.workflowStatus = "escalated";
+                state.outcome = "escalated";
+                break;
+            }
+            // === END ENTERPRISE ADDITION ===
 
             // STEP 5: Execution Agent — Execute the plan
             await runAgent("execution", executionAgent, state);

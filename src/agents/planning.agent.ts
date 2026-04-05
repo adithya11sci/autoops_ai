@@ -1,14 +1,25 @@
 /**
  * Agent 3: Planning Agent (LLM-Based)
  * Uses Groq LLM + ChromaDB RAG to generate remediation plans.
+ *
+ * === ENTERPRISE PRIORITY ORDER ===
+ * 1. Template Service (deterministic, no LLM)
+ * 2. Memory Service (proven past fixes)
+ * 3. Groq LLM (only when above both miss)
+ * 4. Fallback / escalate if Groq unavailable
  */
 import { v4 as uuidv4 } from "uuid";
 import { IncidentState, RemediationPlan, PlanStep } from "../orchestrator/state";
-import { queryLLM } from "../services/groq.client";
+import { queryLLM, GroqUnavailableError } from "../services/groq.client";
 import { querySimilarIncidents } from "../services/chroma.client";
 import { createChildLogger } from "../utils/logger";
+import { TemplateService } from "../services/template.service";
+import { MemoryService } from "../services/memory.service";
+import { IncidentContext } from "../services/enterprise-types";
 
 const log = createChildLogger("PlanningAgent");
+const templateService = new TemplateService();
+const memoryService = new MemoryService();
 
 const SYSTEM_PROMPT = `You are an expert DevOps Site Reliability Engineer (SRE). Your job is to generate a structured remediation plan to resolve infrastructure incidents.
 
@@ -115,6 +126,94 @@ export async function planningAgent(state: IncidentState): Promise<IncidentState
         return state;
     }
 
+    // === ENTERPRISE ADDITION START ===
+    // Build incident context for enterprise services
+    // Enrich errorSignature with raw event reasons for better template matching
+    const rawReasons = state.rawEvents
+        .map((e) => e.data?.reason as string | undefined)
+        .filter(Boolean)
+        .join(" ");
+    const enrichedSignature = `${state.rootCause.category} ${rawReasons}`.trim();
+
+    const incidentContext: IncidentContext = {
+        id: state.incidentId,
+        incidentType: state.issue.type,
+        errorSignature: enrichedSignature,
+        severity: state.issue.severity as IncidentContext["severity"],
+        affectedService: state.issue.affectedService,
+        namespace: state.rawEvents[0]?.source?.namespace,
+        podName: state.rawEvents[0]?.source?.pod,
+        deploymentName: state.issue.affectedService,
+    };
+
+    // Priority 1: Deterministic templates (most reliable, no LLM needed)
+    const templateFix = templateService.findTemplate(incidentContext);
+    if (templateFix) {
+        state.plan = {
+            planId: `plan-tpl-${uuidv4().slice(0, 8)}`,
+            title: templateFix.name,
+            riskLevel: "low",
+            estimatedDurationMinutes: 5,
+            steps: templateFix.fixSteps.map((s, i) => ({
+                stepId: i + 1,
+                action: s.action,
+                description: s.command,
+                parameters: {},
+                timeoutSeconds: s.estimatedDurationSec || 120,
+                rollback: s.rollbackCommand,
+            })),
+            rollbackPlan: templateFix.hasRollbackPlan
+                ? templateFix.fixSteps.filter(s => s.rollbackCommand).map(s => s.rollbackCommand!)
+                : [],
+            requiresApproval: false,
+            ragContext: [],
+        };
+        state.planSource = "template";
+        state.fixId = null;
+        log.info({ templateId: templateFix.templateId }, "🧩 Template fix applied");
+        return state;
+    }
+
+    // Priority 2: Vector memory retrieval (reuse proven past fixes)
+    try {
+        const memoryResult = await memoryService.queryMemory(incidentContext);
+        if (memoryResult.fix && memoryResult.source !== "none") {
+            state.plan = {
+                planId: `plan-mem-${uuidv4().slice(0, 8)}`,
+                title: `Memory fix: ${memoryResult.fix.incidentType} in ${incidentContext.affectedService}`,
+                riskLevel: "medium",
+                estimatedDurationMinutes: 10,
+                steps: memoryResult.fix.fixSteps.map((s, i) => ({
+                    stepId: i + 1,
+                    action: s.action,
+                    description: s.command,
+                    parameters: {},
+                    timeoutSeconds: s.estimatedDurationSec || 120,
+                    rollback: s.rollbackCommand,
+                })),
+                rollbackPlan: ["Revert all changes", "Escalate to on-call"],
+                requiresApproval: false,
+                ragContext: [],
+            };
+            state.planSource = "memory";
+            state.memorySimilarity = memoryResult.similarity;
+            state.fixId = memoryResult.fix.id;
+            state.memoryResult = memoryResult;
+            log.info(
+                { fixId: memoryResult.fix.id, similarity: memoryResult.similarity },
+                "🧠 Memory fix applied"
+            );
+            return state;
+        }
+    } catch (err: unknown) {
+        const error = err as Error;
+        log.warn({ err: error.message }, "Memory service query failed, proceeding to LLM");
+    }
+
+    // Priority 3: Groq LLM (only when templates and memory both miss)
+    state.planSource = "llm";
+    // === ENTERPRISE ADDITION END ===
+
     // Step 1: RAG — retrieve similar past incidents from ChromaDB
     let ragContext: string[] = [];
     try {
@@ -135,11 +234,19 @@ export async function planningAgent(state: IncidentState): Promise<IncidentState
     let llmResponse;
     try {
         llmResponse = await queryLLM(SYSTEM_PROMPT, userPrompt);
-    } catch (err: any) {
-        log.error({ err: err.message }, "Groq LLM request failed");
+    } catch (err: unknown) {
+        const error = err as Error;
+        // === ENTERPRISE ADDITION: Handle GroqUnavailableError ===
+        if (err instanceof GroqUnavailableError) {
+            log.error("Groq LLM unavailable — marking for escalation");
+            state.groqFailed = true;
+            state.planSource = "unavailable";
+            return generateFallbackPlan(state);
+        }
+        log.error({ err: error.message }, "Groq LLM request failed");
         state.errorLog.push({
             agent: "planning",
-            error: `LLM request failed: ${err.message}`,
+            error: `LLM request failed: ${error.message}`,
             timestamp: new Date().toISOString(),
         });
         // Generate a fallback plan

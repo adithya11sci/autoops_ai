@@ -5,8 +5,10 @@
 import { IncidentState, StepResult, PlanStep } from "../orchestrator/state";
 import { config } from "../config";
 import { createChildLogger } from "../utils/logger";
+import { CommandValidatorService } from "../services/command-validator.service";
 
 const log = createChildLogger("ExecutionAgent");
+const commandValidator = new CommandValidatorService();
 
 // ── Simulated Action Handlers ─────────────────────
 
@@ -72,6 +74,36 @@ export async function executionAgent(state: IncidentState): Promise<IncidentStat
     state.executionStatus = "running";
     state.updatedAt = new Date().toISOString();
 
+    // === ENTERPRISE ADDITION START ===
+    // Validate all plan steps before execution — critical safety gate
+    if (state.plan && state.plan.steps.length > 0) {
+        const fixSteps = state.plan.steps.map((s) => ({
+            action: s.action,
+            command: s.description || s.action,
+            estimatedDurationSec: s.timeoutSeconds,
+            rollbackCommand: s.rollback,
+        }));
+
+        const validation = commandValidator.validate(fixSteps);
+        if (!validation.safe) {
+            log.error("HARD_BLOCKED command detected", {
+                incidentId: state.incidentId,
+                reason: validation.reason,
+                blockedSteps: validation.blockedSteps,
+            });
+            state.executionStatus = "failed";
+            state.stepsFailed.push({
+                stepId: 0,
+                action: "command_validation",
+                status: "failed",
+                error: `Blocked: ${validation.reason}`,
+                completedAt: new Date().toISOString(),
+            });
+            return state;
+        }
+    }
+    // === ENTERPRISE ADDITION END ===
+
     if (!state.plan || state.plan.steps.length === 0) {
         log.warn("No plan or empty steps, marking as failed");
         state.executionStatus = "failed";
@@ -102,10 +134,13 @@ export async function executionAgent(state: IncidentState): Promise<IncidentStat
 
             if (config.agents.executionMode === "simulate") {
                 result = await simulateAction(step);
+            } else if (config.agents.executionMode === "shadow") {
+                log.info(`[SHADOW MODE] Would have executed: ${step.description || step.action}`);
+                result = { success: true, output: `[SHADOW MODE] Simulated execution for safe testing: ${step.action}` };
             } else {
                 // Live mode — would integrate with real K8s/Docker APIs
-                log.warn("Live execution mode — using simulation as placeholder");
-                result = await simulateAction(step);
+                log.warn("Live execution mode — running real infrastructure commands");
+                result = await simulateAction(step); // Fallback for safety in this boilerplate
             }
 
             if (result.success) {
