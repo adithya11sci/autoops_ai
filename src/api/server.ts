@@ -10,6 +10,8 @@ import { runPipeline, getIncidentState, getAllIncidentStates, onIncidentUpdate }
 import { generateEvents } from "../simulator/log-producer";
 import { getIncident, listIncidents, getMetrics } from "../services/database";
 import { RawEvent } from "../orchestrator/state";
+// === ENTERPRISE ADDITION ===
+import { registerApprovalRoutes } from "./approvals.router";
 
 const log = createChildLogger("API");
 
@@ -19,6 +21,9 @@ export async function createServer() {
     });
 
     await app.register(cors, { origin: true });
+
+    // === ENTERPRISE ADDITION: Register approval routes ===
+    await registerApprovalRoutes(app);
 
     // ── Health Check ────────────────────────────────────
     app.get("/api/health", async () => {
