@@ -37,7 +37,7 @@ export const config = {
     agents: {
         anomalyThreshold: parseFloat(process.env.ANOMALY_THRESHOLD || "0.7"),
         maxRetries: parseInt(process.env.MAX_RETRIES || "3"),
-        executionMode: (process.env.EXECUTION_MODE || "simulate") as "simulate" | "live",
+        executionMode: (process.env.EXECUTION_MODE || "simulate") as "simulate" | "shadow" | "live",
     },
     logLevel: process.env.LOG_LEVEL || "info",
 };
