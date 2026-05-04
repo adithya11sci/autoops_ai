@@ -39,6 +39,7 @@ Built on the **LangGraph StateGraph** framework, each agent operates as an indep
 - [Presentation Content](docs/PRESENTATION.md)
 - [API Reference](docs/API_REFERENCE.md)
 - [Deployment Guide](docs/DEPLOYMENT.md)
+- [Simulation Working Docs](simulation_working.md)
 
 ---
 
@@ -128,6 +129,7 @@ autoops_ai/
 │   ├── utils/
 │   │   └── logger.ts
 │   └── index.ts
+├── go-ingester/                 # Experimental Go Log Ingester (Inactive)
 ├── infrastructure/                # Infrastructure as Code
 │   ├── docker/
 │   └── kubernetes/
