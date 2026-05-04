@@ -9,6 +9,9 @@
         "dev": "tsx watch src/index.ts",
         "dev:no-watch": "tsx src/index.ts",
         "simulate": "tsx src/simulator/log-producer.ts",
+        "simulate:all": "tsx simulation/run-simulation.ts",
+        "simulate:high-risk": "tsx simulation/high-risk-test.ts",
+        "simulate:blocked": "tsx simulation/blocked-command-test.ts",
         "db:init": "tsx src/services/database.ts --init",
         "lint": "eslint src/",
         "test": "vitest"
@@ -34,7 +37,7 @@
         "@types/uuid": "^9.0.7",
         "@typescript-eslint/eslint-plugin": "^8.58.0",
         "@typescript-eslint/parser": "^8.58.0",
-        "eslint": "^10.1.0",
+        "eslint": "^8.57.0",
         "tsx": "^4.7.0",
         "typescript": "^5.3.3",
         "vitest": "^1.2.0"
