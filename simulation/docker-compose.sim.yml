@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  crash-service:
+    image: alpine:latest
+    command: >
+      /bin/sh -c "echo 'Starting crash-service...'; sleep 5; echo 'FATAL ERROR: NullPointerException in PaymentGateway'; exit 1"
+
+  memory-leak-service:
+    image: node:18-alpine
+    command: >
+      node -e "let arr=[]; setInterval(() => { arr.push(Buffer.alloc(1024*1024)); console.log('[' + new Date().toISOString() + '] WARN: Memory leak growing...', arr.length, 'MB'); if (arr.length > 50) { console.error('FATAL: OOMKilled'); process.exit(137); } }, 100);"
+
+  slow-service:
+    image: node:18-alpine
+    command: >
+      node -e "const http = require('http'); const s = http.createServer((req, res) => { setTimeout(() => { res.end('ok'); }, 5000); console.log('[' + new Date().toISOString() + '] WARN: Request to /api/users took 5000ms (threshold: 200ms)'); }); s.listen(8080); console.log('Listening on 8080'); setTimeout(() => { http.get('http://127.0.0.1:8080/'); }, 1000); setInterval(() => { http.get('http://127.0.0.1:8080/'); }, 6000);"
+
+  bad-image-service:
+    image: node:18-alpine
+    command: >
+      /bin/sh -c "echo 'Error: Cannot find module /app/index.js'; exit 255"
+    restart: on-failure
+
+  healthy-service:
+    image: alpine:latest
+    command: >
+      /bin/sh -c "while true; do echo '['$$(date '+%Y-%m-%dT%H:%M:%S.%3NZ')'] INFO Application is healthy and running smoothly...'; sleep 10; done"
