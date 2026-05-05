@@ -17,8 +17,8 @@ export { GroqParseError, GroqUnavailableError, GroqClientError };
 
 // ── Config from env ──
 const GROQ_API_KEY = process.env.GROQ_API_KEY || config.groq.apiKey;
-const GROQ_MODEL_PLANNING = process.env.GROQ_MODEL_PLANNING || "llama3-70b-8192";
-const GROQ_MODEL_FAST = process.env.GROQ_MODEL_FAST || "llama3-8b-8192";
+const GROQ_MODEL_PLANNING = process.env.GROQ_MODEL_PLANNING || "llama-3.3-70b-versatile";
+const GROQ_MODEL_FAST = process.env.GROQ_MODEL_FAST || "llama-3.1-8b-instant";
 const SLOW_RESPONSE_MS = 2000;
 
 // ── Injectable GroqClient class ──

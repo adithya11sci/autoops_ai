@@ -1,0 +1,33 @@
+﻿ M .env.example
+ M README.md
+ M docker-compose.yml
+ M package-lock.json
+ M package.json
+ M src/agents/execution.agent.ts
+ M src/agents/feedback.agent.ts
+ M src/agents/planning.agent.ts
+ M src/api/server.ts
+ M src/config/index.ts
+ M src/orchestrator/state.ts
+ M src/orchestrator/workflow.ts
+ M src/services/groq.client.ts
+?? .eslintrc.json
+?? .github/
+?? .history/
+?? AutoOps_AI_Enterprise_Report_2026-04-04_Saturday.md
+?? TECH_README.md
+?? docs/PROJECT_ANALYSIS.md
+?? src/__tests__/
+?? src/api/approvals.router.ts
+?? src/api/server.test.ts
+?? src/db/
+?? src/engines/
+?? src/services/approval.service.ts
+?? src/services/command-validator.service.ts
+?? src/services/enterprise-types.ts
+?? src/services/memory.service.ts
+?? src/services/risk.service.ts
+?? src/services/template.service.ts
+?? status.txt
+?? status2.txt
+?? understanding_project.md
