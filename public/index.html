@@ -1123,7 +1123,7 @@ async function loadIncidents() {
   } catch {
     // Fallback: no data
     document.getElementById('incidents-tbody').innerHTML =
-      '<tr><td colspan="9" class="no-incidents">Unable to load incidents. Is PostgreSQL running?</td></tr>';
+      '<tr><td colspan="9" class="no-incidents">No incidents yet — trigger a scenario above.</td></tr>';
   }
 }
 
@@ -1145,7 +1145,7 @@ function renderIncidentsTable(incidents) {
     const rootCat = (inc.rootCauseCategory || inc.root_cause_category || '—').replace(/_/g, ' ');
     const service = inc.rootCauseService || inc.root_cause_service || '—';
     const priority = inc.priority || '—';
-    const execStatus = inc.executionStatus || inc.execution_status || '—';
+    const execStatus = inc.decision_action || inc.decisionAction || inc.executionStatus || inc.execution_status || '—';
     const outcome = inc.outcome || '—';
     const dur = inc.durationSeconds || inc.duration_seconds;
     const incId = inc.incidentId || inc.id || '—';

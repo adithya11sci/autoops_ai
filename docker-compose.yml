@@ -1,10 +1,17 @@
-version: "3.9"
+# ── Network ──────────────────────────────────────────────────
+# All services share one internal network; only the app and
+# Kafka external port are exposed to the host.
+networks:
+  autoops:
+    driver: bridge
 
 services:
-  # ── PostgreSQL ──────────────────────────────────
+
+  # ── PostgreSQL ──────────────────────────────────────────────
   postgres:
     image: postgres:15-alpine
     container_name: autoops-postgres
+    networks: [autoops]
     environment:
       POSTGRES_DB: autoops
       POSTGRES_USER: autoops
@@ -17,59 +24,114 @@ services:
       test: ["CMD-SHELL", "pg_isready -U autoops"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
-  # ── Apache Kafka (KRaft mode, no Zookeeper) ────
+  # ── Apache Kafka (KRaft — no ZooKeeper) ────────────────────
+  # Two listeners:
+  #   INTERNAL://kafka:9092  — used by Docker services (autoops-app)
+  #   EXTERNAL://localhost:9094 — used by host-based tools / npm run dev
   kafka:
-    image: apache/kafka:latest
+    image: apache/kafka:3.7.1
     container_name: autoops-kafka
+    networks: [autoops]
     environment:
-      - KAFKA_NODE_ID=1
-      - KAFKA_PROCESS_ROLES=broker,controller
-      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
-      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
-      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093
-      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
-      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
-      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
-      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
-      - KAFKA_NUM_PARTITIONS=1
-      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
-      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
-      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
-      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
     ports:
-      - "9092:9092"
+      - "9092:9092"   # internal (Docker services)
+      - "9094:9094"   # external (host / local npm run dev)
     volumes:
-      - kafka_data:/bitnami/kafka
+      - kafka_data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
-      interval: 10s
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
       timeout: 10s
-      retries: 5
+      retries: 10
       start_period: 30s
 
-  # ── ChromaDB ────────────────────────────────────
+  # ── ChromaDB (vector store for incident memory) ─────────────
   chromadb:
     image: chromadb/chroma:latest
     container_name: autoops-chromadb
+    networks: [autoops]
     ports:
       - "8000:8000"
     volumes:
       - chroma_data:/chroma/chroma
     environment:
-      - ANONYMIZED_TELEMETRY=false
+      ANONYMIZED_TELEMETRY: "false"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8000 && echo -e 'GET /api/v2/heartbeat HTTP/1.0\\r\\n\\r\\n' >&3 && cat <&3 | grep -q heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  # ── Redis ───────────────────────────────────────
+  # ── Redis (session / approval cache) ───────────────────────
   redis:
     image: redis:7-alpine
     container_name: autoops-redis
+    networks: [autoops]
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── AutoOps AI (Node.js API + Agent Pipeline) ───────────────
+  autoops-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: autoops-ai:latest
+    container_name: autoops-app
+    networks: [autoops]
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env          # base config (API keys, thresholds, etc.)
+    environment:
+      # Override host references with Docker service names
+      POSTGRES_HOST: postgres
+      KAFKA_BROKERS: kafka:9092
+      CHROMA_HOST: chromadb
+      REDIS_HOST: redis
+      HOST: 0.0.0.0
+      PORT: 3000
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 volumes:
   postgres_data:

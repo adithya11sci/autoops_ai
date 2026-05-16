@@ -243,11 +243,14 @@ export async function listIncidents(
     return {
         incidents: all.slice(offset, offset + limit).map((i) => ({
             id: i.id,
+            incidentId: i.id,
             created_at: i.created_at,
             severity: i.severity,
             root_cause_category: i.root_cause_category,
+            root_cause_service: i.root_cause_service,
             priority: i.priority,
             execution_status: i.execution_status,
+            decision_action: i.full_state?.decisionResult?.action ?? i.execution_status ?? '—',
             outcome: i.outcome,
             duration_seconds: i.duration_seconds,
         })),
