@@ -1,225 +1,295 @@
 /**
- * Database Service — PostgreSQL for incident persistence and audit trail.
+ * Database Service — In-memory store (no PostgreSQL / Docker required).
+ * Exports the same API surface as the original PostgreSQL implementation.
  */
-import { Pool, PoolClient } from "pg";
-import { config } from "../config";
+import { v4 as uuidv4 } from "uuid";
 import { createChildLogger } from "../utils/logger";
 import { IncidentState } from "../orchestrator/state";
 
 const log = createChildLogger("Database");
 
-let pool: Pool | null = null;
+// ── In-memory tables ──────────────────────────────────────────────
+const incidentsStore = new Map<string, any>();
+const incidentEventsStore: any[] = [];
+const storedFixesStore = new Map<string, any>();
+const approvalsStore = new Map<string, any>();
 
-export function getPool(): Pool {
-    if (!pool) {
-        pool = new Pool({
-            host: config.postgres.host,
-            port: config.postgres.port,
-            database: config.postgres.database,
-            user: config.postgres.user,
-            password: config.postgres.password,
-            max: 20,
-            idleTimeoutMillis: 30000,
-        });
-        log.info("PostgreSQL pool created");
+// ── Fake Pool used by services that call getPool().query() ────────
+
+class InMemoryPool {
+    async query(sql: string, params: any[] = []): Promise<{ rows: any[]; rowCount: number }> {
+        const s = sql.trim().replace(/\s+/g, " ");
+
+        if (/stored_fixes/i.test(s)) return this.storedFixes(s, params);
+        if (/approvals/i.test(s)) return this.approvals(s, params);
+
+        // decision_audit and risk_assessments are audit-only — accept and discard
+        if (/INSERT/i.test(s)) return { rows: [], rowCount: 1 };
+
+        // DDL (CREATE TABLE / CREATE INDEX) — no-op
+        return { rows: [], rowCount: 0 };
     }
+
+    private storedFixes(s: string, params: any[]): { rows: any[]; rowCount: number } {
+        if (/^INSERT/i.test(s)) {
+            storedFixesStore.set(params[0], {
+                id: params[0],
+                incident_type: params[1],
+                error_signature: params[2],
+                fix_steps: params[3],
+                rl_score: params[4] ?? 0.5,
+                success_count: params[5] ?? 0,
+                failure_count: params[6] ?? 0,
+                last_used_at: new Date().toISOString(),
+                created_at: new Date().toISOString(),
+            });
+            return { rows: [], rowCount: 1 };
+        }
+
+        if (/WHERE id = ANY/i.test(s)) {
+            const ids: string[] = params[0] || [];
+            const rows = ids.map((id) => storedFixesStore.get(id)).filter(Boolean);
+            return { rows, rowCount: rows.length };
+        }
+
+        if (/^SELECT.*FROM stored_fixes WHERE id/i.test(s)) {
+            const fix = storedFixesStore.get(params[0]);
+            return { rows: fix ? [fix] : [], rowCount: fix ? 1 : 0 };
+        }
+
+        if (/^UPDATE stored_fixes/i.test(s)) {
+            const fix = storedFixesStore.get(params[3]);
+            if (fix) {
+                fix.rl_score = params[0];
+                fix.success_count = (fix.success_count || 0) + (params[1] || 0);
+                fix.failure_count = (fix.failure_count || 0) + (params[2] || 0);
+                fix.last_used_at = new Date().toISOString();
+            }
+            return { rows: [], rowCount: fix ? 1 : 0 };
+        }
+
+        return { rows: [], rowCount: 0 };
+    }
+
+    private approvals(s: string, params: any[]): { rows: any[]; rowCount: number } {
+        // INSERT
+        if (/^INSERT INTO approvals/i.test(s)) {
+            const id = uuidv4();
+            approvalsStore.set(id, {
+                id,
+                incident_ids: params[0] || [],
+                service_name: params[1],
+                namespace: params[2],
+                fix_id: params[3],
+                risk_score: params[4],
+                risk_tier: params[5],
+                plan_summary: params[6],
+                status: "PENDING",
+                approver_id: null,
+                approver_comment: null,
+                created_at: new Date().toISOString(),
+                decided_at: null,
+            });
+            return { rows: [{ id }], rowCount: 1 };
+        }
+
+        // Group-check: find pending approval for same service+namespace in window
+        if (/WHERE service_name/i.test(s)) {
+            const cutoff = new Date(Date.now() - parseInt(params[2] || "300000"));
+            const rows = Array.from(approvalsStore.values())
+                .filter(
+                    (a) =>
+                        a.service_name === params[0] &&
+                        a.namespace === params[1] &&
+                        a.status === "PENDING" &&
+                        new Date(a.created_at) > cutoff
+                )
+                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                .slice(0, 1);
+            return { rows, rowCount: rows.length };
+        }
+
+        // UPDATE incident_ids (grouping)
+        if (/SET incident_ids/i.test(s)) {
+            const a = approvalsStore.get(params[1]);
+            if (a) a.incident_ids = params[0];
+            return { rows: [], rowCount: a ? 1 : 0 };
+        }
+
+        // SELECT status only
+        if (/^SELECT status FROM approvals WHERE id/i.test(s)) {
+            const a = approvalsStore.get(params[0]);
+            return { rows: a ? [{ status: a.status }] : [], rowCount: a ? 1 : 0 };
+        }
+
+        // UPDATE with timeout literal
+        if (/SET status = 'TIMEOUT'/i.test(s)) {
+            const a = approvalsStore.get(params[0]);
+            if (a) { a.status = "TIMEOUT"; a.decided_at = new Date().toISOString(); }
+            return { rows: [], rowCount: a ? 1 : 0 };
+        }
+
+        // UPDATE status + approver (from router and approval service)
+        if (/SET status.*approver_id/i.test(s)) {
+            const a = approvalsStore.get(params[3]);
+            if (a) {
+                a.status = params[0];
+                a.approver_id = params[1];
+                a.approver_comment = params[2];
+                a.decided_at = new Date().toISOString();
+            }
+            return { rows: [], rowCount: a ? 1 : 0 };
+        }
+
+        // SELECT * / single row by id
+        if (/WHERE id = \$1/i.test(s)) {
+            const a = approvalsStore.get(params[0]);
+            return { rows: a ? [a] : [], rowCount: a ? 1 : 0 };
+        }
+
+        // List (optional status filter + LIMIT/OFFSET)
+        if (/^SELECT.*FROM approvals/i.test(s)) {
+            let rows = Array.from(approvalsStore.values());
+            const hasStatusFilter = /WHERE status/i.test(s);
+            let limit: number, offset: number;
+
+            if (hasStatusFilter) {
+                rows = rows.filter((a) => a.status === params[0]);
+                limit = (params[1] as number) ?? 20;
+                offset = (params[2] as number) ?? 0;
+            } else {
+                limit = (params[0] as number) ?? 20;
+                offset = (params[1] as number) ?? 0;
+            }
+
+            rows = rows
+                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                .slice(offset, offset + limit);
+            return { rows, rowCount: rows.length };
+        }
+
+        return { rows: [], rowCount: 0 };
+    }
+
+    async end(): Promise<void> {}
+}
+
+const pool = new InMemoryPool();
+
+export function getPool(): any {
     return pool;
 }
 
-/**
- * Initialize database schema.
- */
 export async function initDatabase(): Promise<void> {
-    const db = getPool();
-
-    await db.query(`
-    CREATE TABLE IF NOT EXISTS incidents (
-      id VARCHAR(50) PRIMARY KEY,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      resolved_at TIMESTAMPTZ,
-      severity VARCHAR(20),
-      root_cause_category VARCHAR(100),
-      root_cause_service VARCHAR(100),
-      root_cause_description TEXT,
-      root_cause_confidence REAL,
-      plan_title TEXT,
-      plan_steps JSONB,
-      priority VARCHAR(10),
-      execution_status VARCHAR(20),
-      outcome VARCHAR(20),
-      duration_seconds INTEGER,
-      retry_count INTEGER DEFAULT 0,
-      lessons_learned JSONB,
-      full_state JSONB,
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    );
-  `);
-
-    await db.query(`
-    CREATE TABLE IF NOT EXISTS incident_events (
-      id BIGSERIAL PRIMARY KEY,
-      incident_id VARCHAR(50) REFERENCES incidents(id),
-      agent VARCHAR(50) NOT NULL,
-      event_type VARCHAR(50) NOT NULL,
-      data JSONB,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-  `);
-
-    await db.query(`
-    CREATE INDEX IF NOT EXISTS idx_incidents_created ON incidents(created_at DESC);
-  `);
-    await db.query(`
-    CREATE INDEX IF NOT EXISTS idx_incidents_outcome ON incidents(outcome);
-  `);
-    await db.query(`
-    CREATE INDEX IF NOT EXISTS idx_events_incident ON incident_events(incident_id);
-  `);
-
-    log.info("Database schema initialized");
+    log.info("In-memory database initialized (no PostgreSQL required)");
 }
 
-/**
- * Save an incident state to the database.
- */
 export async function saveIncident(state: IncidentState): Promise<void> {
-    const db = getPool();
     const duration = state.outcome
-        ? Math.round(
-            (new Date().getTime() - new Date(state.createdAt).getTime()) / 1000
-        )
+        ? Math.round((new Date().getTime() - new Date(state.createdAt).getTime()) / 1000)
         : null;
 
-    await db.query(
-        `INSERT INTO incidents (
-      id, created_at, severity, root_cause_category, root_cause_service,
-      root_cause_description, root_cause_confidence, plan_title, plan_steps,
-      priority, execution_status, outcome, duration_seconds, retry_count,
-      lessons_learned, full_state, resolved_at, updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
-    ON CONFLICT (id) DO UPDATE SET
-      severity = EXCLUDED.severity,
-      root_cause_category = EXCLUDED.root_cause_category,
-      root_cause_service = EXCLUDED.root_cause_service,
-      root_cause_description = EXCLUDED.root_cause_description,
-      root_cause_confidence = EXCLUDED.root_cause_confidence,
-      plan_title = EXCLUDED.plan_title,
-      plan_steps = EXCLUDED.plan_steps,
-      priority = EXCLUDED.priority,
-      execution_status = EXCLUDED.execution_status,
-      outcome = EXCLUDED.outcome,
-      duration_seconds = EXCLUDED.duration_seconds,
-      retry_count = EXCLUDED.retry_count,
-      lessons_learned = EXCLUDED.lessons_learned,
-      full_state = EXCLUDED.full_state,
-      resolved_at = EXCLUDED.resolved_at,
-      updated_at = NOW()
-    `,
-        [
-            state.incidentId,
-            state.createdAt,
-            state.issue?.severity || null,
-            state.rootCause?.category || null,
-            state.rootCause?.service || null,
-            state.rootCause?.description || null,
-            state.rootCause?.confidence || null,
-            state.plan?.title || null,
-            JSON.stringify(state.plan?.steps || []),
-            state.priority,
-            state.executionStatus,
-            state.outcome,
-            duration,
-            state.retryCount,
-            JSON.stringify(state.lessonsLearned),
-            JSON.stringify(state),
-            state.outcome ? new Date().toISOString() : null,
-        ]
-    );
+    incidentsStore.set(state.incidentId, {
+        id: state.incidentId,
+        created_at: state.createdAt,
+        resolved_at: state.outcome ? new Date().toISOString() : null,
+        severity: state.issue?.severity || null,
+        root_cause_category: state.rootCause?.category || null,
+        root_cause_service: state.rootCause?.service || null,
+        root_cause_description: state.rootCause?.description || null,
+        root_cause_confidence: state.rootCause?.confidence || null,
+        plan_title: state.plan?.title || null,
+        plan_steps: state.plan?.steps || [],
+        priority: state.priority,
+        execution_status: state.executionStatus,
+        outcome: state.outcome,
+        duration_seconds: duration,
+        retry_count: state.retryCount,
+        lessons_learned: state.lessonsLearned,
+        full_state: state,
+        updated_at: new Date().toISOString(),
+    });
 
-    log.info({ incidentId: state.incidentId }, "Incident saved to database");
+    log.info({ incidentId: state.incidentId }, "Incident saved to in-memory store");
 }
 
-/**
- * Log an agent event for audit trail.
- */
 export async function logAgentEvent(
     incidentId: string,
     agent: string,
     eventType: string,
     data: any
 ): Promise<void> {
-    const db = getPool();
-    await db.query(
-        `INSERT INTO incident_events (incident_id, agent, event_type, data)
-     VALUES ($1, $2, $3, $4)`,
-        [incidentId, agent, eventType, JSON.stringify(data)]
-    );
+    incidentEventsStore.push({
+        id: incidentEventsStore.length + 1,
+        incident_id: incidentId,
+        agent,
+        event_type: eventType,
+        data,
+        created_at: new Date().toISOString(),
+    });
 }
 
-/**
- * Get incident by ID.
- */
 export async function getIncident(id: string): Promise<any | null> {
-    const db = getPool();
-    const result = await db.query(
-        `SELECT * FROM incidents WHERE id = $1`,
-        [id]
-    );
-    return result.rows[0] || null;
+    return incidentsStore.get(id) || null;
 }
 
-/**
- * List recent incidents.
- */
 export async function listIncidents(
     limit: number = 20,
     offset: number = 0
 ): Promise<{ incidents: any[]; total: number }> {
-    const db = getPool();
-    const countResult = await db.query(`SELECT COUNT(*) FROM incidents`);
-    const total = parseInt(countResult.rows[0].count);
-
-    const result = await db.query(
-        `SELECT id, created_at, severity, root_cause_category, priority,
-            execution_status, outcome, duration_seconds
-     FROM incidents ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-        [limit, offset]
+    const all = Array.from(incidentsStore.values()).sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     );
-
-    return { incidents: result.rows, total };
+    return {
+        incidents: all.slice(offset, offset + limit).map((i) => ({
+            id: i.id,
+            created_at: i.created_at,
+            severity: i.severity,
+            root_cause_category: i.root_cause_category,
+            priority: i.priority,
+            execution_status: i.execution_status,
+            outcome: i.outcome,
+            duration_seconds: i.duration_seconds,
+        })),
+        total: all.length,
+    };
 }
 
-/**
- * Get system metrics.
- */
 export async function getMetrics(): Promise<any> {
-    const db = getPool();
-    const result = await db.query(`
-    SELECT
-      COUNT(*) as total_incidents,
-      COUNT(*) FILTER (WHERE outcome = 'resolved') as resolved,
-      COUNT(*) FILTER (WHERE outcome = 'failed') as failed_count,
-      COUNT(*) FILTER (WHERE outcome = 'escalated') as escalated,
-      ROUND(AVG(duration_seconds) FILTER (WHERE outcome = 'resolved')) as avg_mttr,
-      ROUND(AVG(root_cause_confidence) FILTER (WHERE root_cause_confidence IS NOT NULL)::numeric, 2) as avg_rca_confidence
-    FROM incidents
-  `);
-    const row = result.rows[0];
-    const total = parseInt(row.total_incidents) || 0;
-    const resolved = parseInt(row.resolved) || 0;
+    const all = Array.from(incidentsStore.values());
+    const total = all.length;
+    const resolved = all.filter((i) => i.outcome === "resolved").length;
+    const failed = all.filter((i) => i.outcome === "failed").length;
+    const escalated = all.filter((i) => i.outcome === "escalated").length;
+
+    const resolvedWithDuration = all.filter((i) => i.outcome === "resolved" && i.duration_seconds);
+    const avgMTTR =
+        resolvedWithDuration.length > 0
+            ? Math.round(
+                  resolvedWithDuration.reduce((s, i) => s + (i.duration_seconds || 0), 0) /
+                      resolvedWithDuration.length
+              )
+            : 0;
+
+    const confItems = all.filter((i) => i.root_cause_confidence != null);
+    const avgConf =
+        confItems.length > 0
+            ? parseFloat(
+                  (confItems.reduce((s, i) => s + (i.root_cause_confidence || 0), 0) / confItems.length).toFixed(2)
+              )
+            : 0;
 
     return {
         totalIncidents: total,
         resolvedAutomatically: resolved,
         autoResolutionRate: total > 0 ? resolved / total : 0,
-        averageMTTR: parseInt(row.avg_mttr) || 0,
-        failedCount: parseInt(row.failed_count) || 0,
-        escalatedCount: parseInt(row.escalated) || 0,
-        avgRcaConfidence: parseFloat(row.avg_rca_confidence) || 0,
+        averageMTTR: avgMTTR,
+        failedCount: failed,
+        escalatedCount: escalated,
+        avgRcaConfidence: avgConf,
     };
 }
 
 export async function closePool(): Promise<void> {
-    if (pool) await pool.end();
-    log.info("PostgreSQL pool closed");
+    log.info("In-memory database closed");
 }

@@ -17,7 +17,9 @@ function getKafka(): Kafka {
         kafka = new Kafka({
             clientId: config.kafka.clientId,
             brokers: config.kafka.brokers,
-            retry: { retries: 5, initialRetryTime: 300 },
+            connectionTimeout: 3000,
+            retry: { retries: 1, initialRetryTime: 500, maxRetryTime: 1000 },
+            logLevel: 0, // Suppress kafkajs internal logs (errors surface via connect errors)
         });
     }
     return kafka;

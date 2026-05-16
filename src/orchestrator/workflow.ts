@@ -1,8 +1,8 @@
 /**
  * AutoOps AI — Workflow Orchestrator (LangGraph-Inspired StateGraph)
  *
- * Central orchestrator that connects all 6 agents in a stateful workflow
- * with conditional branching, retry logic, and escalation.
+ * Central orchestrator connecting all 6 agents in a stateful workflow with
+ * conditional branching, retry logic, escalation, and real-time broadcasting.
  *
  * Flow: Monitoring → RCA → Planning → SLA → Decision → Execution → Feedback
  *       └───── retry (on failure, up to maxRetries) ─────┘
@@ -16,24 +16,26 @@ import { executionAgent } from "../agents/execution.agent";
 import { feedbackAgent } from "../agents/feedback.agent";
 import { logAgentEvent } from "../services/database";
 import { createChildLogger } from "../utils/logger";
-// === ENTERPRISE ADDITION: Decision Engine ===
 import { DecisionEngine } from "../engines/decision.engine";
 import { CommandValidatorService } from "../services/command-validator.service";
 import { RiskService } from "../services/risk.service";
 import { ApprovalService } from "../services/approval.service";
+import {
+    broadcast,
+    broadcastLog,
+    recordPipelineStart,
+    recordPipelineComplete,
+} from "../services/broadcast";
 
 const log = createChildLogger("Orchestrator");
 
-// Instantiate enterprise services
 const commandValidator = new CommandValidatorService();
 const riskService = new RiskService();
 const approvalService = new ApprovalService();
 const decisionEngine = new DecisionEngine(commandValidator, riskService, approvalService);
 
-// Store active incidents for API queries
 const activeIncidents = new Map<string, IncidentState>();
 
-// Event listeners for real-time updates
 type IncidentListener = (state: IncidentState) => void;
 const listeners: IncidentListener[] = [];
 
@@ -42,125 +44,180 @@ export function onIncidentUpdate(listener: IncidentListener) {
 }
 
 function notifyListeners(state: IncidentState) {
+    // Broadcast full state to all WS clients
+    broadcast("incident_update", state);
+
     for (const listener of listeners) {
-        try {
-            listener(state);
-        } catch { }
+        try { listener(state); } catch { }
     }
 }
 
 /**
- * Run the full incident pipeline from raw events.
+ * Pre-register an incident so it can be queried immediately (for async pipeline trigger).
  */
-export async function runPipeline(rawEvents: RawEvent[]): Promise<IncidentState> {
-    const state = createIncidentState(rawEvents);
+export function preRegisterIncident(state: IncidentState): void {
+    activeIncidents.set(state.incidentId, state);
+}
+
+/**
+ * Run the full incident pipeline from raw events.
+ * Accepts an optional pre-created state (for async/non-blocking triggers).
+ */
+export async function runPipeline(rawEvents: RawEvent[], existingState?: IncidentState): Promise<IncidentState> {
+    const state = existingState || createIncidentState(rawEvents);
     activeIncidents.set(state.incidentId, state);
 
-    log.info(
-        { incidentId: state.incidentId, eventCount: rawEvents.length },
-        "═══════════════════════════════════════════════════"
+    recordPipelineStart();
+
+    broadcast("pipeline_start", {
+        incidentId: state.incidentId,
+        eventCount: rawEvents.length,
+        timestamp: state.createdAt,
+    });
+
+    broadcastLog("orchestrator", "info",
+        `Pipeline started for ${rawEvents.length} events`,
+        { incidentId: state.incidentId }
     );
-    log.info(
-        { incidentId: state.incidentId },
-        "🚀 PIPELINE STARTED — Autonomous Incident Resolution"
-    );
-    log.info(
-        {},
-        "═══════════════════════════════════════════════════"
-    );
+
+    log.info({ incidentId: state.incidentId, eventCount: rawEvents.length }, "🚀 PIPELINE STARTED");
 
     const startTime = Date.now();
 
     try {
-        // ──────────────────────────────────────────────────
-        // STEP 1: Monitoring Agent — Detect anomalies
-        // ──────────────────────────────────────────────────
+        // ── STEP 1: Monitoring Agent ──────────────────────────────
         await runAgent("monitoring", monitoringAgent, state);
         notifyListeners(state);
 
         if (!state.issue) {
-            log.info({ incidentId: state.incidentId }, "No anomaly detected. Pipeline complete.");
+            broadcastLog("orchestrator", "info", "No anomaly detected — pipeline complete", { incidentId: state.incidentId });
             state.workflowStatus = "completed";
             state.outcome = "resolved";
+
+            const totalMs = Date.now() - startTime;
+            recordPipelineComplete("resolved", totalMs);
+            broadcast("pipeline_complete", { incidentId: state.incidentId, outcome: "resolved", durationMs: totalMs });
+            activeIncidents.set(state.incidentId, state);
             return state;
         }
 
-        // ──────────────────────────────────────────────────
-        // STEP 2: RCA Agent — Identify root cause
-        // ──────────────────────────────────────────────────
+        broadcastLog("orchestrator", "info",
+            `Anomaly detected: ${state.issue.type} in ${state.issue.affectedService} (score: ${state.issue.anomalyScore.toFixed(3)})`,
+            { severity: state.issue.severity, issueId: state.issue.issueId }
+        );
+
+        // ── STEP 2: RCA Agent ──────────────────────────────────────
         await runAgent("rca", rcaAgent, state);
         notifyListeners(state);
 
-        // ──────────────────────────────────────────────────
-        // STEPS 3-6: Planning → SLA → Decision → Execution (with retry loop)
-        // ──────────────────────────────────────────────────
+        if (state.rootCause) {
+            broadcastLog("orchestrator", "info",
+                `Root cause: ${state.rootCause.category} in ${state.rootCause.service} (confidence: ${(state.rootCause.confidence * 100).toFixed(0)}%)`,
+                { remediationHint: state.rootCause.remediationHint }
+            );
+        }
+
+        // ── STEPS 3-6: Planning → SLA → Decision → Execution (retry loop) ──
         let resolved = false;
 
         while (!resolved && state.retryCount <= state.maxRetries) {
-            // STEP 3: Planning Agent — Generate remediation plan
+            // STEP 3: Planning Agent
             await runAgent("planning", planningAgent, state);
             notifyListeners(state);
 
-            // STEP 4: SLA Agent — Assign priority
+            if (state.plan) {
+                broadcastLog("orchestrator", "info",
+                    `Plan ready: "${state.plan.title}" (${state.plan.steps.length} steps, ${state.plan.riskLevel} risk, source: ${state.planSource || "llm"})`,
+                    { planId: state.plan.planId }
+                );
+            }
+
+            // STEP 4: SLA Agent
             await runAgent("sla", slaAgent, state);
             notifyListeners(state);
 
-            // === ENTERPRISE ADDITION: STEP 4.5 — Decision Engine ===
-            // Runs between planning/SLA and execution.
-            // Validates commands, assesses risk, routes to approval if needed.
+            if (state.priority) {
+                broadcastLog("orchestrator", "info",
+                    `Priority: ${state.priority} | SLA deadline: ${state.slaDeadline} | Fast-track: ${state.fastTrack}`,
+                    { priority: state.priority }
+                );
+            }
+
+            // STEP 4.5: Decision Engine
+            const decisionStart = Date.now();
+            broadcast("agent_start", { incidentId: state.incidentId, agent: "decision", timestamp: new Date().toISOString() });
+
             try {
                 const decisionResult = await decisionEngine.decide(state);
                 state.decisionResult = decisionResult;
+
+                const decisionDuration = Date.now() - decisionStart;
+                const decisionStatus = decisionResult.action === "block" || decisionResult.action === "escalate_human"
+                    ? "error" : "success";
+
+                broadcast("agent_complete", {
+                    incidentId: state.incidentId,
+                    agent: "decision",
+                    duration: decisionDuration,
+                    status: decisionStatus,
+                    data: {
+                        action: decisionResult.action,
+                        reason: decisionResult.reason,
+                        riskScore: state.riskAssessment?.score,
+                        riskTier: state.riskAssessment?.tier,
+                    },
+                });
+
+                broadcastLog(
+                    "decision",
+                    decisionStatus === "error" ? "warn" : "info",
+                    `Decision: ${decisionResult.action.toUpperCase()} — ${decisionResult.reason}`,
+                    { riskScore: state.riskAssessment?.score, tier: state.riskAssessment?.tier }
+                );
+
                 notifyListeners(state);
 
                 if (decisionResult.action === "block" || decisionResult.action === "escalate_human") {
-                    log.warn(
-                        {
-                            incidentId: state.incidentId,
-                            action: decisionResult.action,
-                            reason: decisionResult.reason,
-                        },
-                        `🚫 Decision: ${decisionResult.action.toUpperCase()} — ${decisionResult.reason}`
-                    );
+                    log.warn({ action: decisionResult.action, reason: decisionResult.reason }, `🚫 Decision: BLOCKED`);
                     state.workflowStatus = "escalated";
                     state.outcome = "escalated";
-                    break; // Skip execution, go to feedback
+                    break;
                 }
 
-                log.info(
-                    {
-                        incidentId: state.incidentId,
-                        action: decisionResult.action,
-                        reason: decisionResult.reason,
-                    },
-                    `✅ Decision: ${decisionResult.action.toUpperCase()}`
-                );
+                log.info({ action: decisionResult.action }, `✅ Decision: ${decisionResult.action.toUpperCase()}`);
             } catch (err: unknown) {
                 const error = err as Error;
+                const decisionDuration = Date.now() - decisionStart;
+                broadcast("agent_complete", {
+                    incidentId: state.incidentId,
+                    agent: "decision",
+                    duration: decisionDuration,
+                    status: "error",
+                    data: { error: error.message },
+                });
+                broadcastLog("decision", "error", `Decision engine failed — blocking for safety: ${error.message}`);
                 log.error({ err: error.message }, "Decision engine failed — blocking for safety");
                 state.workflowStatus = "escalated";
                 state.outcome = "escalated";
                 break;
             }
-            // === END ENTERPRISE ADDITION ===
 
-            // STEP 5: Execution Agent — Execute the plan
+            // STEP 5: Execution Agent
             await runAgent("execution", executionAgent, state);
             notifyListeners(state);
 
-            // Check execution result
             if (state.executionStatus === "success") {
                 resolved = true;
+                broadcastLog("orchestrator", "info", `All execution steps completed successfully`);
                 log.info("✅ Execution succeeded!");
             } else {
-                // Retry logic
                 state.retryCount++;
                 if (state.retryCount <= state.maxRetries) {
-                    log.warn(
-                        { retryCount: state.retryCount, maxRetries: state.maxRetries },
-                        `⚠️ Execution failed. Replanning... (attempt ${state.retryCount}/${state.maxRetries})`
+                    broadcastLog("orchestrator", "warn",
+                        `Execution failed — replanning (attempt ${state.retryCount}/${state.maxRetries})`,
+                        { failedSteps: state.stepsFailed.map(s => s.action) }
                     );
-                    // Reset execution state for retry
+                    log.warn({ retryCount: state.retryCount }, `⚠️ Replanning...`);
                     state.executionStatus = "pending";
 
                     try {
@@ -170,58 +227,62 @@ export async function runPipeline(rawEvents: RawEvent[]): Promise<IncidentState>
                         });
                     } catch { }
                 } else {
-                    log.error(
-                        { retryCount: state.retryCount },
-                        "❌ Max retries exceeded — ESCALATING to human operator"
-                    );
+                    broadcastLog("orchestrator", "error", `Max retries exceeded — escalating to human operator`);
+                    log.error({ retryCount: state.retryCount }, "❌ Max retries exceeded — ESCALATING");
                     state.workflowStatus = "escalated";
                 }
             }
         }
 
-        // ──────────────────────────────────────────────────
-        // STEP 6: Feedback Agent — Learn and store
-        // ──────────────────────────────────────────────────
+        // ── STEP 6: Feedback Agent ─────────────────────────────────
         await runAgent("feedback", feedbackAgent, state);
         notifyListeners(state);
+
+        if (state.outcome) {
+            broadcastLog("feedback", "info",
+                `Incident ${state.outcome.toUpperCase()} — stored to ChromaDB for future RAG`,
+                { lessons: state.lessonsLearned.length }
+            );
+        }
 
     } catch (err: any) {
         log.error({ err: err.message, incidentId: state.incidentId }, "Pipeline error");
         state.workflowStatus = "failed";
-        state.errorLog.push({
-            agent: "orchestrator",
-            error: err.message,
-            timestamp: new Date().toISOString(),
-        });
+        state.errorLog.push({ agent: "orchestrator", error: err.message, timestamp: new Date().toISOString() });
+        broadcast("pipeline_error", { incidentId: state.incidentId, error: err.message });
     }
 
     const totalMs = Date.now() - startTime;
-    log.info(
-        {},
-        "═══════════════════════════════════════════════════"
+
+    recordPipelineComplete(state.outcome || "failed", totalMs);
+
+    broadcast("pipeline_complete", {
+        incidentId: state.incidentId,
+        outcome: state.outcome,
+        durationMs: totalMs,
+        stepsCompleted: state.stepsCompleted.length,
+        stepsFailed: state.stepsFailed.length,
+        retryCount: state.retryCount,
+    });
+
+    broadcastLog("orchestrator", state.outcome === "resolved" ? "info" : "warn",
+        `Pipeline complete: ${(state.outcome || "unknown").toUpperCase()} in ${(totalMs / 1000).toFixed(1)}s`,
+        { retries: state.retryCount }
     );
-    log.info(
-        {
-            incidentId: state.incidentId,
-            outcome: state.outcome,
-            duration: `${(totalMs / 1000).toFixed(1)}s`,
-            retries: state.retryCount,
-            stepsCompleted: state.stepsCompleted.length,
-            stepsFailed: state.stepsFailed.length,
-        },
-        `🏁 PIPELINE COMPLETE — ${state.outcome?.toUpperCase() || "UNKNOWN"} (${(totalMs / 1000).toFixed(1)}s)`
-    );
-    log.info(
-        {},
-        "═══════════════════════════════════════════════════"
-    );
+
+    log.info({
+        incidentId: state.incidentId,
+        outcome: state.outcome,
+        duration: `${(totalMs / 1000).toFixed(1)}s`,
+        retries: state.retryCount,
+    }, `🏁 PIPELINE COMPLETE — ${(state.outcome || "UNKNOWN").toUpperCase()}`);
 
     activeIncidents.set(state.incidentId, state);
     return state;
 }
 
 /**
- * Run a single agent with error handling and logging.
+ * Run a single agent with error handling, logging, and broadcast.
  */
 async function runAgent(
     name: string,
@@ -229,45 +290,85 @@ async function runAgent(
     state: IncidentState
 ): Promise<void> {
     const start = Date.now();
+
+    broadcast("agent_start", {
+        incidentId: state.incidentId,
+        agent: name,
+        timestamp: new Date().toISOString(),
+    });
+
     try {
         await agentFn(state);
         const duration = Date.now() - start;
 
+        broadcast("agent_complete", {
+            incidentId: state.incidentId,
+            agent: name,
+            duration,
+            status: "success",
+            data: extractAgentOutput(name, state),
+        });
+
         try {
-            await logAgentEvent(state.incidentId, name, "completed", {
-                durationMs: duration,
-                status: "success",
-            });
+            await logAgentEvent(state.incidentId, name, "completed", { durationMs: duration, status: "success" });
         } catch { }
 
     } catch (err: any) {
         const duration = Date.now() - start;
         log.error({ agent: name, err: err.message, durationMs: duration }, `Agent ${name} failed`);
-        state.errorLog.push({
+
+        broadcast("agent_complete", {
+            incidentId: state.incidentId,
             agent: name,
-            error: err.message,
-            timestamp: new Date().toISOString(),
+            duration,
+            status: "error",
+            data: { error: err.message },
         });
 
+        state.errorLog.push({ agent: name, error: err.message, timestamp: new Date().toISOString() });
+
         try {
-            await logAgentEvent(state.incidentId, name, "failed", {
-                durationMs: duration,
-                error: err.message,
-            });
+            await logAgentEvent(state.incidentId, name, "failed", { durationMs: duration, error: err.message });
         } catch { }
     }
 }
 
 /**
- * Get an active or completed incident state.
+ * Extract key output data from state for each agent (shown in UI).
  */
+function extractAgentOutput(agentName: string, state: IncidentState): Record<string, unknown> | null {
+    switch (agentName) {
+        case "monitoring":
+            return state.issue
+                ? { type: state.issue.type, score: state.issue.anomalyScore, severity: state.issue.severity, service: state.issue.affectedService }
+                : { noAnomaly: true };
+        case "rca":
+            return state.rootCause
+                ? { category: state.rootCause.category, confidence: state.rootCause.confidence, service: state.rootCause.service }
+                : null;
+        case "planning":
+            return state.plan
+                ? { title: state.plan.title, steps: state.plan.steps.length, risk: state.plan.riskLevel, source: state.planSource }
+                : null;
+        case "sla":
+            return state.priority ? { priority: state.priority, fastTrack: state.fastTrack } : null;
+        case "execution":
+            return {
+                stepsCompleted: state.stepsCompleted.length,
+                stepsFailed: state.stepsFailed.length,
+                status: state.executionStatus,
+            };
+        case "feedback":
+            return { outcome: state.outcome, lessons: state.lessonsLearned.length };
+        default:
+            return null;
+    }
+}
+
 export function getIncidentState(incidentId: string): IncidentState | undefined {
     return activeIncidents.get(incidentId);
 }
 
-/**
- * Get all incident states.
- */
 export function getAllIncidentStates(): IncidentState[] {
     return Array.from(activeIncidents.values()).sort(
         (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()

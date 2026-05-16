@@ -31,16 +31,33 @@ const TIEBREAKER_RANGE = 0.02;
 import { Redis } from "ioredis";
 
 // ── Redis Cache Service ──
-// Connect to real Redis as required by true enterprise features
+let redisAvailable = true;
 const redis = new Redis({
     host: process.env.REDIS_HOST || "localhost",
     port: parseInt(process.env.REDIS_PORT || "6379"),
-    maxRetriesPerRequest: 3,
+    maxRetriesPerRequest: 1,
+    enableOfflineQueue: false,
+    lazyConnect: true,
+    retryStrategy: (times: number) => {
+        if (times >= 3) {
+            // Stop retrying after 3 attempts — Redis is not available
+            redisAvailable = false;
+            return null; // null = stop retrying
+        }
+        return Math.min(times * 500, 2000);
+    },
 });
 
-redis.on("error", (err) => {
-    log.error({ err: err.message }, "Redis connection error in memory service");
+let redisErrLogged = false;
+redis.on("error", () => {
+    if (!redisErrLogged) {
+        log.warn("Redis not available — memory service using ChromaDB only (this is non-fatal)");
+        redisErrLogged = true;
+    }
+    redisAvailable = false;
 });
+
+redis.connect().catch(() => { /* handled by error event */ });
 
 const CACHE_TTL_SEC = 30 * 60; // 30 minutes in seconds
 
@@ -59,9 +76,9 @@ export class MemoryService {
     async queryMemory(incident: IncidentContext): Promise<MemoryResult> {
         const fp = this.fingerprint(incident);
 
-        // Step 1: Check Redis cache
+        // Step 1: Check Redis cache (only if available)
         const cacheKey = `fix:${fp}`;
-        const cachedRaw = await redis.get(cacheKey).catch(() => null);
+        const cachedRaw = redisAvailable ? await redis.get(cacheKey).catch(() => null) : null;
         
         if (cachedRaw) {
             try {

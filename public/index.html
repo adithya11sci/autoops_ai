@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoOps AI — Enterprise Dashboard</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #21262d;
+  --border: #30363d;
+  --border2: #3d444d;
+  --accent: #58a6ff;
+  --accent-dim: rgba(88,166,255,0.12);
+  --success: #3fb950;
+  --success-dim: rgba(63,185,80,0.12);
+  --warn: #d29922;
+  --warn-dim: rgba(210,153,34,0.12);
+  --danger: #f85149;
+  --danger-dim: rgba(248,81,73,0.12);
+  --purple: #bc8cff;
+  --purple-dim: rgba(188,140,255,0.12);
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; line-height: 1.5; min-height: 100vh; }
+a { color: var(--accent); text-decoration: none; }
+
+/* ── Header ─────────────────────────────────── */
+header {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 24px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(8px);
+}
+.logo { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 700; letter-spacing: -0.3px; }
+.logo-icon { font-size: 22px; }
+.logo-sub { font-size: 11px; font-weight: 400; color: var(--muted); letter-spacing: 0.5px; text-transform: uppercase; }
+.header-right { display: flex; align-items: center; gap: 20px; }
+.conn-status { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: all 0.3s; }
+.conn-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.conn-dot.disconnected { background: var(--danger); }
+.conn-dot.connecting { background: var(--warn); animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: 0.3; } }
+#clock { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.exec-mode-badge { padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; background: var(--warn-dim); color: var(--warn); border: 1px solid var(--warn); }
+
+/* ── Main Layout ─────────────────────────────── */
+main { max-width: 1600px; margin: 0 auto; padding: 20px 24px 40px; }
+
+/* ── Metrics Row ─────────────────────────────── */
+.metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+.metric-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px 20px; transition: border-color 0.2s;
+}
+.metric-card:hover { border-color: var(--border2); }
+.metric-value { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.metric-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+.metric-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.metric-resolved .metric-value { color: var(--success); }
+.metric-active .metric-value { color: var(--accent); }
+.metric-mttr .metric-value { color: var(--purple); }
+
+/* ── Section ─────────────────────────────────── */
+.section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
+.section-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--border); }
+.section-title { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.section-title .icon { font-size: 16px; }
+.section-body { padding: 20px; }
+
+/* ── Pipeline ────────────────────────────────── */
+.pipeline-wrap { padding: 20px; overflow-x: auto; }
+.pipeline { display: flex; align-items: center; gap: 0; min-width: max-content; }
+.agent-node {
+  display: flex; flex-direction: column; align-items: center;
+  width: 120px; padding: 14px 8px; border-radius: 10px;
+  border: 2px solid var(--border); background: var(--surface2);
+  transition: all 0.35s cubic-bezier(.4,0,.2,1); position: relative;
+  cursor: default;
+}
+.agent-node .agent-icon { font-size: 26px; margin-bottom: 6px; filter: grayscale(0.6); transition: filter 0.3s; }
+.agent-node .agent-name { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); transition: color 0.3s; }
+.agent-node .agent-desc { font-size: 9px; color: var(--muted); text-align: center; margin-top: 2px; opacity: 0.7; }
+.agent-node .agent-status { margin-top: 8px; font-size: 10px; font-weight: 600; color: var(--muted); padding: 2px 8px; border-radius: 20px; background: var(--border); transition: all 0.3s; white-space: nowrap; }
+.agent-node .agent-output { font-size: 9px; color: var(--muted); text-align: center; margin-top: 4px; max-width: 110px; word-break: break-word; min-height: 18px; transition: all 0.3s; line-height: 1.3; }
+
+/* Agent states */
+.agent-node.active {
+  border-color: var(--accent); background: var(--accent-dim);
+  animation: pulse-blue 1.5s ease-in-out infinite;
+}
+.agent-node.active .agent-icon { filter: grayscale(0); }
+.agent-node.active .agent-name { color: var(--accent); }
+.agent-node.active .agent-status { background: var(--accent-dim); color: var(--accent); border: 1px solid var(--accent); }
+@keyframes pulse-blue {
+  0%,100% { box-shadow: 0 0 0 0 rgba(88,166,255,0.35); }
+  50% { box-shadow: 0 0 0 10px rgba(88,166,255,0); }
+}
+.agent-node.done {
+  border-color: var(--success); background: var(--success-dim);
+}
+.agent-node.done .agent-icon { filter: grayscale(0); }
+.agent-node.done .agent-name { color: var(--success); }
+.agent-node.done .agent-status { background: var(--success-dim); color: var(--success); border: 1px solid var(--success); }
+.agent-node.error {
+  border-color: var(--danger); background: var(--danger-dim);
+  animation: pulse-red 1.5s ease-in-out infinite;
+}
+.agent-node.error .agent-icon { filter: grayscale(0); }
+.agent-node.error .agent-name { color: var(--danger); }
+.agent-node.error .agent-status { background: var(--danger-dim); color: var(--danger); border: 1px solid var(--danger); }
+@keyframes pulse-red {
+  0%,100% { box-shadow: 0 0 0 0 rgba(248,81,73,0.35); }
+  50% { box-shadow: 0 0 0 8px rgba(248,81,73,0); }
+}
+.agent-node.warn {
+  border-color: var(--warn); background: var(--warn-dim);
+}
+.agent-node.warn .agent-icon { filter: grayscale(0); }
+.agent-node.warn .agent-name { color: var(--warn); }
+.agent-node.warn .agent-status { background: var(--warn-dim); color: var(--warn); border: 1px solid var(--warn); }
+.agent-node.queued { opacity: 0.5; }
+
+/* Pipeline connector */
+.connector {
+  width: 40px; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; position: relative; height: 2px; background: var(--border);
+  margin: 0 -1px; transition: background 0.3s;
+}
+.connector::after {
+  content: ''; position: absolute; right: -6px; top: -4px;
+  border: 5px solid transparent; border-left-color: var(--border);
+  transition: border-left-color 0.3s;
+}
+.connector.flow { background: var(--accent); }
+.connector.flow::after { border-left-color: var(--accent); }
+.connector.done { background: var(--success); }
+.connector.done::after { border-left-color: var(--success); }
+.connector.error { background: var(--danger); }
+.connector.error::after { border-left-color: var(--danger); }
+
+/* ── Content Grid ────────────────────────────── */
+.content-grid { display: grid; grid-template-columns: 55fr 45fr; gap: 16px; margin-bottom: 16px; }
+
+/* ── Incident Panel ──────────────────────────── */
+.incident-panel { display: flex; flex-direction: column; }
+.empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
+.empty-state .empty-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.4; }
+.empty-state p { font-size: 13px; }
+
+/* Incident header */
+.inc-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 16px; gap: 12px; }
+.inc-id { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.inc-title { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
+.inc-meta { font-size: 11px; color: var(--muted); }
+.badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.badge { padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; }
+.badge-crit { background: var(--danger-dim); color: var(--danger); border: 1px solid var(--danger); }
+.badge-high { background: var(--warn-dim); color: var(--warn); border: 1px solid var(--warn); }
+.badge-med { background: rgba(210,153,34,0.08); color: #e3b341; border: 1px solid #e3b341; }
+.badge-low { background: var(--success-dim); color: var(--success); border: 1px solid var(--success); }
+.badge-p0 { background: var(--danger-dim); color: var(--danger); border: 1px solid var(--danger); }
+.badge-p1 { background: var(--warn-dim); color: var(--warn); border: 1px solid var(--warn); }
+.badge-p2 { background: var(--purple-dim); color: var(--purple); border: 1px solid var(--purple); }
+.badge-p3, .badge-p4 { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+.badge-resolved { background: var(--success-dim); color: var(--success); border: 1px solid var(--success); }
+.badge-escalated { background: var(--warn-dim); color: var(--warn); border: 1px solid var(--warn); }
+.badge-failed { background: var(--danger-dim); color: var(--danger); border: 1px solid var(--danger); }
+.badge-running { background: var(--accent-dim); color: var(--accent); border: 1px solid var(--accent); }
+.badge-template { background: var(--success-dim); color: var(--success); }
+.badge-memory { background: var(--purple-dim); color: var(--purple); }
+.badge-llm { background: var(--accent-dim); color: var(--accent); }
+.badge-auto { background: var(--success-dim); color: var(--success); }
+.badge-notify { background: var(--warn-dim); color: var(--warn); }
+.badge-approve { background: var(--purple-dim); color: var(--purple); }
+.badge-block { background: var(--danger-dim); color: var(--danger); }
+
+/* Timeline */
+.timeline { list-style: none; padding: 0; }
+.timeline-item {
+  display: flex; gap: 12px; padding: 8px 0;
+  border-bottom: 1px solid var(--border); animation: fadeIn 0.3s ease;
+}
+.timeline-item:last-child { border-bottom: none; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.timeline-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex-shrink: 0; margin-top: 5px; }
+.timeline-dot.done { background: var(--success); }
+.timeline-dot.error { background: var(--danger); }
+.timeline-dot.warn { background: var(--warn); }
+.timeline-dot.running { background: var(--accent); animation: blink 0.8s infinite; }
+.timeline-content { flex: 1; min-width: 0; }
+.timeline-msg { font-size: 12px; color: var(--text); word-break: break-word; }
+.timeline-time { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Execution steps */
+.exec-steps { display: flex; flex-direction: column; gap: 6px; }
+.exec-step { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 6px; background: var(--surface2); border: 1px solid var(--border); font-size: 12px; transition: all 0.2s; }
+.exec-step.running { border-color: var(--accent); background: var(--accent-dim); }
+.exec-step.success { border-color: var(--success); background: var(--success-dim); }
+.exec-step.failed { border-color: var(--danger); background: var(--danger-dim); }
+.exec-step.blocked { border-color: var(--danger); background: var(--danger-dim); }
+.exec-step.pending { opacity: 0.5; }
+.step-icon { font-size: 14px; flex-shrink: 0; }
+.step-action { font-weight: 600; font-family: var(--mono); }
+.step-output { font-size: 10px; color: var(--muted); margin-top: 2px; white-space: pre-line; }
+.step-duration { margin-left: auto; font-size: 10px; color: var(--muted); flex-shrink: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; display: inline-block; }
+
+/* Outcome card */
+.outcome-card { margin-top: 16px; padding: 16px; border-radius: 8px; text-align: center; border: 2px solid; }
+.outcome-card.resolved { border-color: var(--success); background: var(--success-dim); }
+.outcome-card.escalated { border-color: var(--warn); background: var(--warn-dim); }
+.outcome-card.failed { border-color: var(--danger); background: var(--danger-dim); }
+.outcome-icon { font-size: 32px; margin-bottom: 8px; }
+.outcome-title { font-size: 18px; font-weight: 700; }
+.outcome-meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+/* Info grid */
+.info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+.info-item { padding: 10px 12px; background: var(--surface2); border-radius: 6px; }
+.info-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 3px; }
+.info-value { font-size: 13px; font-weight: 500; }
+.info-mono { font-family: var(--mono); font-size: 11px; }
+
+/* Risk meter */
+.risk-meter { position: relative; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; margin-top: 4px; }
+.risk-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
+.risk-low { background: var(--success); }
+.risk-medium { background: var(--warn); }
+.risk-high { background: var(--danger); }
+
+/* ── Log Panel ───────────────────────────────── */
+.log-panel { display: flex; flex-direction: column; }
+.log-controls { display: flex; gap: 8px; align-items: center; }
+.log-btn { padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--surface2); color: var(--muted); font-size: 11px; cursor: pointer; transition: all 0.2s; }
+.log-btn:hover { border-color: var(--border2); color: var(--text); }
+.log-stream {
+  height: 420px; overflow-y: auto; padding: 8px 0;
+  font-family: var(--mono); font-size: 11px;
+  scroll-behavior: smooth;
+}
+.log-stream::-webkit-scrollbar { width: 4px; }
+.log-stream::-webkit-scrollbar-track { background: transparent; }
+.log-stream::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.log-entry { display: flex; align-items: flex-start; gap: 8px; padding: 4px 12px; border-radius: 4px; animation: fadeIn 0.2s ease; }
+.log-entry:hover { background: var(--surface2); }
+.log-ts { color: var(--muted); flex-shrink: 0; min-width: 90px; }
+.log-agent { min-width: 80px; flex-shrink: 0; font-weight: 600; }
+.log-msg { flex: 1; word-break: break-word; }
+.log-entry.info .log-agent { color: var(--accent); }
+.log-entry.warn .log-agent { color: var(--warn); }
+.log-entry.error .log-agent { color: var(--danger); }
+.log-count { font-size: 10px; color: var(--muted); }
+
+/* ── Scenarios ───────────────────────────────── */
+.scenarios-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; padding: 16px 20px; }
+.scenario-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 14px 8px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface2);
+  color: var(--text); cursor: pointer; transition: all 0.2s; font-family: var(--font);
+}
+.scenario-btn:hover { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); transform: translateY(-1px); }
+.scenario-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.scenario-btn.loading { border-color: var(--accent); background: var(--accent-dim); animation: pulse-blue 1s infinite; }
+.scenario-icon { font-size: 22px; }
+.scenario-name { font-size: 10px; font-weight: 600; text-align: center; text-transform: uppercase; letter-spacing: 0.4px; }
+
+/* ── Incidents Table ─────────────────────────── */
+.incidents-table { width: 100%; border-collapse: collapse; }
+.incidents-table th { padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+.incidents-table td { padding: 10px 16px; font-size: 12px; border-bottom: 1px solid var(--border); }
+.incidents-table tr:last-child td { border-bottom: none; }
+.incidents-table tr:hover td { background: var(--surface2); }
+.incidents-table .mono { font-family: var(--mono); font-size: 11px; }
+.incidents-table .dur { color: var(--muted); }
+.outcome-icon-sm { font-size: 14px; }
+.no-incidents { text-align: center; padding: 40px; color: var(--muted); font-size: 13px; }
+
+/* ── Scrollbar ───────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ── Responsive ──────────────────────────────── */
+@media (max-width: 1100px) {
+  .content-grid { grid-template-columns: 1fr; }
+  .scenarios-grid { grid-template-columns: repeat(4, 1fr); }
+  .metrics-row { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 600px) {
+  .scenarios-grid { grid-template-columns: repeat(2, 1fr); }
+  .metrics-row { grid-template-columns: 1fr 1fr; }
+  main { padding: 12px; }
+}
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────── -->
+<header>
+  <div class="logo">
+    <span class="logo-icon">🤖</span>
+    <div>
+      <div>AutoOps AI</div>
+      <div class="logo-sub">Autonomous Incident Resolution</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <span class="exec-mode-badge" id="exec-mode">simulate</span>
+    <div class="conn-status">
+      <div class="conn-dot connecting" id="conn-dot"></div>
+      <span id="conn-label">Connecting...</span>
+    </div>
+    <div id="clock">--:--:--</div>
+  </div>
+</header>
+
+<main>
+
+<!-- ── Metrics Row ─────────────────────────────────────── -->
+<div class="metrics-row">
+  <div class="metric-card">
+    <div class="metric-value" id="m-total">—</div>
+    <div class="metric-label">Total Incidents</div>
+    <div class="metric-sub" id="m-total-sub">&nbsp;</div>
+  </div>
+  <div class="metric-card metric-resolved">
+    <div class="metric-value" id="m-rate">—</div>
+    <div class="metric-label">Auto-Resolution Rate</div>
+    <div class="metric-sub" id="m-resolved-sub">&nbsp;</div>
+  </div>
+  <div class="metric-card metric-mttr">
+    <div class="metric-value" id="m-mttr">—</div>
+    <div class="metric-label">Avg MTTR</div>
+    <div class="metric-sub">mean time to resolution</div>
+  </div>
+  <div class="metric-card metric-active">
+    <div class="metric-value" id="m-active">0</div>
+    <div class="metric-label">Active Pipelines</div>
+    <div class="metric-sub" id="m-active-sub">idle</div>
+  </div>
+</div>
+
+<!-- ── AI Agent Pipeline ───────────────────────────────── -->
+<div class="section" style="margin-bottom:16px;">
+  <div class="section-header">
+    <div class="section-title"><span class="icon">⚡</span> AI Agent Pipeline</div>
+    <div style="font-size:11px;color:var(--muted);" id="pipeline-status">Idle — trigger a scenario below</div>
+  </div>
+  <div class="pipeline-wrap">
+    <div class="pipeline" id="pipeline">
+      <!-- Monitoring -->
+      <div class="agent-node queued" id="agent-monitoring">
+        <div class="agent-icon">🔍</div>
+        <div class="agent-name">Monitoring</div>
+        <div class="agent-desc">Anomaly Detection</div>
+        <div class="agent-status">Idle</div>
+        <div class="agent-output" id="out-monitoring"></div>
+      </div>
+      <div class="connector" id="con-mon-rca"></div>
+      <!-- RCA -->
+      <div class="agent-node queued" id="agent-rca">
+        <div class="agent-icon">🔎</div>
+        <div class="agent-name">RCA</div>
+        <div class="agent-desc">Root Cause Analysis</div>
+        <div class="agent-status">Idle</div>
+        <div class="agent-output" id="out-rca"></div>
+      </div>
+      <div class="connector" id="con-rca-plan"></div>
+      <!-- Planning -->
+      <div class="agent-node queued" id="agent-planning">
+        <div class="agent-icon">📋</div>
+        <div class="agent-name">Planning</div>
+        <div class="agent-desc">Remediation Plan</div>
+        <div class="agent-status">Idle</div>
+        <div class="agent-output" id="out-planning"></div>
+      </div>
+      <div class="connector" id="con-plan-sla"></div>
+      <!-- SLA -->
+      <div class="agent-node queued" id="agent-sla">
+        <div class="agent-icon">⏰</div>
+        <div class="agent-name">SLA</div>
+        <div class="agent-desc">Priority &amp; SLA</div>
+        <div class="agent-status">Idle</div>
+        <div class="agent-output" id="out-sla"></div>
+      </div>
+      <div class="connector" id="con-sla-dec"></div>
+      <!-- Decision -->
+      <div class="agent-node queued" id="agent-decision">
+        <div class="agent-icon">⚖️</div>
+        <div class="agent-name">Decision</div>
+        <div class="agent-desc">Risk Assessment</div>
+        <div class="agent-status">Idle</div>
+        <div class="agent-output" id="out-decision"></div>
+      </div>
+      <div class="connector" id="con-dec-exec"></div>
+      <!-- Execution -->
+      <div class="agent-node queued" id="agent-execution">
+        <div class="agent-icon">⚙️</div>
+        <div class="agent-name">Execution</div>
+        <div class="agent-desc">Fix Execution</div>
+        <div class="agent-status">Idle</div>
+        <div class="agent-output" id="out-execution"></div>
+      </div>
+      <div class="connector" id="con-exec-feed"></div>
+      <!-- Feedback -->
+      <div class="agent-node queued" id="agent-feedback">
+        <div class="agent-icon">📚</div>
+        <div class="agent-name">Feedback</div>
+        <div class="agent-desc">Learn &amp; Audit</div>
+        <div class="agent-status">Idle</div>
+        <div class="agent-output" id="out-feedback"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Content Grid ────────────────────────────────────── -->
+<div class="content-grid">
+
+  <!-- Incident Panel -->
+  <div class="section incident-panel">
+    <div class="section-header">
+      <div class="section-title"><span class="icon">🚨</span> Active Incident</div>
+      <div id="inc-duration" style="font-size:11px;color:var(--muted);"></div>
+    </div>
+    <div class="section-body" id="incident-body">
+      <div class="empty-state">
+        <div class="empty-icon">🛡️</div>
+        <p>No active incident detected.</p>
+        <p style="margin-top:6px;">Click a scenario below to start the AI pipeline.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log Panel -->
+  <div class="section log-panel">
+    <div class="section-header">
+      <div class="section-title"><span class="icon">📡</span> Live Agent Activity <span class="log-count" id="log-count"></span></div>
+      <div class="log-controls">
+        <button class="log-btn" onclick="clearLogs()">Clear</button>
+        <button class="log-btn" id="scroll-btn" onclick="toggleAutoScroll()">⏸ Pause</button>
+      </div>
+    </div>
+    <div class="log-stream" id="log-stream"></div>
+  </div>
+
+</div>
+
+<!-- ── Scenario Triggers ───────────────────────────────── -->
+<div class="section" style="margin-bottom:16px;">
+  <div class="section-header">
+    <div class="section-title"><span class="icon">🎯</span> Trigger Incident Scenario</div>
+    <div style="font-size:11px;color:var(--muted);">AI will autonomously detect, diagnose, plan, and execute a fix</div>
+  </div>
+  <div class="scenarios-grid">
+    <button class="scenario-btn" onclick="trigger('oom_kill', this)" data-scenario="oom_kill">
+      <span class="scenario-icon">💥</span>
+      <span class="scenario-name">OOM Kill</span>
+    </button>
+    <button class="scenario-btn" onclick="trigger('high_error_rate', this)" data-scenario="high_error_rate">
+      <span class="scenario-icon">📈</span>
+      <span class="scenario-name">Error Rate</span>
+    </button>
+    <button class="scenario-btn" onclick="trigger('cpu_spike', this)" data-scenario="cpu_spike">
+      <span class="scenario-icon">🔥</span>
+      <span class="scenario-name">CPU Spike</span>
+    </button>
+    <button class="scenario-btn" onclick="trigger('disk_full', this)" data-scenario="disk_full">
+      <span class="scenario-icon">💾</span>
+      <span class="scenario-name">Disk Full</span>
+    </button>
+    <button class="scenario-btn" onclick="trigger('connection_pool_exhaustion', this)" data-scenario="connection_pool_exhaustion">
+      <span class="scenario-icon">🔌</span>
+      <span class="scenario-name">DB Pool</span>
+    </button>
+    <button class="scenario-btn" onclick="trigger('service_down', this)" data-scenario="service_down">
+      <span class="scenario-icon">⛔</span>
+      <span class="scenario-name">Service Down</span>
+    </button>
+    <button class="scenario-btn" onclick="trigger('random', this)" data-scenario="random">
+      <span class="scenario-icon">🎲</span>
+      <span class="scenario-name">Random</span>
+    </button>
+  </div>
+</div>
+
+<!-- ── Incident History ────────────────────────────────── -->
+<div class="section">
+  <div class="section-header">
+    <div class="section-title"><span class="icon">📋</span> Incident History</div>
+    <button class="log-btn" onclick="loadIncidents()">↻ Refresh</button>
+  </div>
+  <div style="overflow-x:auto;">
+    <table class="incidents-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Started</th>
+          <th>Issue Type</th>
+          <th>Service</th>
+          <th>Severity</th>
+          <th>Priority</th>
+          <th>Decision</th>
+          <th>Outcome</th>
+          <th>MTTR</th>
+        </tr>
+      </thead>
+      <tbody id="incidents-tbody">
+        <tr><td colspan="9" class="no-incidents">Loading incidents...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+</main>
+
+<script>
+// ── State ──────────────────────────────────────────────────
+const uiState = {
+  ws: null,
+  reconnectDelay: 1000,
+  autoScroll: true,
+  logCount: 0,
+  maxLogs: 300,
+  activeIncidentId: null,
+  activeIncident: null,
+  agentTimings: {},
+  execSteps: {},    // stepId → { action, status, output, duration }
+  timeline: [],
+  triggerBtn: null,
+  pipelineRunning: false,
+};
+
+// ── Clock ──────────────────────────────────────────────────
+function initClock() {
+  function tick() {
+    const now = new Date();
+    document.getElementById('clock').textContent =
+      now.toLocaleTimeString('en-US', { hour12: false });
+  }
+  tick();
+  setInterval(tick, 1000);
+}
+
+// ── WebSocket ──────────────────────────────────────────────
+function connectWs() {
+  setConnStatus('connecting');
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${proto}//${location.host}/ws`;
+
+  try {
+    uiState.ws = new WebSocket(wsUrl);
+  } catch (e) {
+    scheduleReconnect();
+    return;
+  }
+
+  uiState.ws.onopen = () => {
+    setConnStatus('connected');
+    uiState.reconnectDelay = 1000;
+    addLog('system', 'info', 'Connected to AutoOps AI real-time feed');
+  };
+
+  uiState.ws.onmessage = (e) => {
+    try { handleMessage(JSON.parse(e.data)); } catch (err) { console.error('WS parse error', err); }
+  };
+
+  uiState.ws.onclose = () => {
+    setConnStatus('disconnected');
+    scheduleReconnect();
+  };
+
+  uiState.ws.onerror = () => uiState.ws.close();
+}
+
+function scheduleReconnect() {
+  addLog('system', 'warn', `Reconnecting in ${uiState.reconnectDelay / 1000}s...`);
+  setTimeout(connectWs, uiState.reconnectDelay);
+  uiState.reconnectDelay = Math.min(uiState.reconnectDelay * 2, 15000);
+}
+
+function setConnStatus(status) {
+  const dot = document.getElementById('conn-dot');
+  const label = document.getElementById('conn-label');
+  dot.className = `conn-dot ${status}`;
+  label.textContent = status === 'connected' ? 'Live' : status === 'connecting' ? 'Connecting...' : 'Disconnected';
+}
+
+// ── Message Handler ────────────────────────────────────────
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'connected':
+      if (msg.payload && msg.payload.metrics) updateMetricsDisplay(msg.payload.metrics);
+      break;
+    case 'pipeline_start':
+      onPipelineStart(msg.payload);
+      break;
+    case 'agent_start':
+      onAgentStart(msg.payload);
+      break;
+    case 'agent_complete':
+      onAgentComplete(msg.payload);
+      break;
+    case 'incident_update':
+      onIncidentUpdate(msg.payload);
+      break;
+    case 'execution_step':
+      onExecutionStep(msg.payload);
+      break;
+    case 'pipeline_complete':
+      onPipelineComplete(msg.payload);
+      break;
+    case 'pipeline_error':
+      onPipelineError(msg.payload);
+      break;
+    case 'log':
+      const d = msg.payload;
+      addLog(d.agent || 'system', d.level || 'info', d.message);
+      break;
+    case 'metrics_update':
+      updateMetricsDisplay(msg.payload);
+      break;
+  }
+}
+
+// ── Pipeline Events ────────────────────────────────────────
+function onPipelineStart(data) {
+  uiState.activeIncidentId = data.incidentId;
+  uiState.pipelineRunning = true;
+  uiState.agentTimings = {};
+  uiState.execSteps = {};
+  uiState.timeline = [];
+  uiState.activeIncident = null;
+
+  resetPipeline();
+  document.getElementById('pipeline-status').textContent =
+    `Running: ${data.incidentId} (${data.eventCount} events)`;
+
+  addTimeline(`Pipeline started — analyzing ${data.eventCount} events`, 'running');
+  renderIncidentPanel();
+  document.getElementById('m-active').textContent = '●';
+  document.getElementById('m-active-sub').textContent = 'pipeline running';
+}
+
+function onAgentStart(data) {
+  if (data.incidentId !== uiState.activeIncidentId) return;
+  uiState.agentTimings[data.agent] = Date.now();
+  setAgentStatus(data.agent, 'active');
+  setConnectorActive(data.agent);
+}
+
+function onAgentComplete(data) {
+  if (data.incidentId !== uiState.activeIncidentId) return;
+  const status = data.status === 'success' ? 'done' : 'error';
+  setAgentStatus(data.agent, status, data.data, data.duration);
+  setConnectorDone(data.agent, status);
+
+  // Add timeline entry based on agent output
+  const d = data.data || {};
+  if (data.agent === 'monitoring' && d.type) {
+    addTimeline(`Anomaly: ${d.type} in ${d.service} (score: ${d.score ? d.score.toFixed(3) : '?'})`, 'done');
+  } else if (data.agent === 'rca' && d.category) {
+    addTimeline(`Root cause: ${d.category} (confidence: ${d.confidence ? (d.confidence*100).toFixed(0) : '?'}%)`, 'done');
+  } else if (data.agent === 'planning' && d.title) {
+    addTimeline(`Plan: "${d.title}" — ${d.steps} steps, ${d.risk} risk [${d.source || 'llm'}]`, 'done');
+  } else if (data.agent === 'sla' && d.priority) {
+    addTimeline(`Priority: ${d.priority}${d.fastTrack ? ' [FAST-TRACK]' : ''}`, 'done');
+  } else if (data.agent === 'decision') {
+    const act = d.action || 'unknown';
+    const score = d.riskScore !== undefined ? ` | risk: ${d.riskScore}/100` : '';
+    addTimeline(`Decision: ${act.toUpperCase()}${score}`, act === 'execute' || act === 'execute_notify' ? 'done' : 'error');
+  } else if (data.agent === 'execution') {
+    addTimeline(`Execution: ${d.stepsCompleted} done, ${d.stepsFailed} failed (${d.status})`,
+      d.status === 'success' ? 'done' : d.status === 'partial' ? 'warn' : 'error');
+  } else if (data.agent === 'feedback' && d.outcome) {
+    addTimeline(`Feedback recorded: ${d.outcome.toUpperCase()} — ${d.lessons} lessons learned`, 'done');
+  }
+}
+
+function onIncidentUpdate(state) {
+  if (state.incidentId !== uiState.activeIncidentId) return;
+  uiState.activeIncident = state;
+  renderIncidentPanel();
+}
+
+function onExecutionStep(data) {
+  if (data.incidentId !== uiState.activeIncidentId) return;
+  uiState.execSteps[data.stepId] = data;
+
+  // Timeline entry for steps
+  if (data.status === 'running') {
+    addTimeline(`Execute step ${data.stepNum}/${data.totalSteps}: ${data.action}`, 'running');
+  } else if (data.status === 'success') {
+    // Update last running entry
+    const last = uiState.timeline[uiState.timeline.length - 1];
+    if (last && last.msg.includes(data.action)) {
+      last.status = 'done';
+      last.msg = `Execute step ${data.stepNum}/${data.totalSteps}: ${data.action} ✓ (${(data.durationMs/1000).toFixed(1)}s)`;
+    }
+  }
+
+  // Update exec steps display in incident panel
+  renderExecSteps();
+  renderTimeline();
+}
+
+function onPipelineComplete(data) {
+  uiState.pipelineRunning = false;
+  const outcome = data.outcome || 'unknown';
+  const dur = data.durationMs ? `${(data.durationMs / 1000).toFixed(1)}s` : '?';
+
+  document.getElementById('pipeline-status').textContent =
+    `Last: ${uiState.activeIncidentId} — ${outcome.toUpperCase()} in ${dur}`;
+
+  addTimeline(
+    `✅ Pipeline complete: ${outcome.toUpperCase()} in ${dur}`,
+    outcome === 'resolved' ? 'done' : outcome === 'escalated' ? 'warn' : 'error'
+  );
+
+  // Re-enable trigger buttons
+  enableScenarioButtons();
+
+  // Refresh metrics and table
+  loadMetrics();
+  setTimeout(loadIncidents, 1000);
+
+  document.getElementById('m-active').textContent = '0';
+  document.getElementById('m-active-sub').textContent = 'idle';
+}
+
+function onPipelineError(data) {
+  uiState.pipelineRunning = false;
+  addTimeline(`Pipeline error: ${data.error}`, 'error');
+  enableScenarioButtons();
+}
+
+// ── Pipeline Node Control ──────────────────────────────────
+const AGENTS = ['monitoring', 'rca', 'planning', 'sla', 'decision', 'execution', 'feedback'];
+const CONNECTOR_MAP = {
+  monitoring: 'con-mon-rca',
+  rca: 'con-rca-plan',
+  planning: 'con-plan-sla',
+  sla: 'con-sla-dec',
+  decision: 'con-dec-exec',
+  execution: 'con-exec-feed',
+};
+const AGENT_LABELS = {
+  monitoring: 'Monitoring',
+  rca: 'RCA',
+  planning: 'Planning',
+  sla: 'SLA',
+  decision: 'Decision',
+  execution: 'Execution',
+  feedback: 'Feedback',
+};
+
+function resetPipeline() {
+  for (const agent of AGENTS) {
+    const node = document.getElementById(`agent-${agent}`);
+    if (node) {
+      node.className = 'agent-node queued';
+      node.querySelector('.agent-status').textContent = 'Queued';
+      const out = document.getElementById(`out-${agent}`);
+      if (out) out.textContent = '';
+    }
+  }
+  for (const id of Object.values(CONNECTOR_MAP)) {
+    const el = document.getElementById(id);
+    if (el) el.className = 'connector';
+  }
+}
+
+function setAgentStatus(agent, status, data, duration) {
+  const node = document.getElementById(`agent-${agent}`);
+  if (!node) return;
+
+  node.className = `agent-node ${status}`;
+  const statusEl = node.querySelector('.agent-status');
+  const outEl = document.getElementById(`out-${agent}`);
+
+  const statusLabels = {
+    active: '⟳ Running',
+    done: '✓ Done',
+    error: '✗ Failed',
+    warn: '⚠ Blocked',
+    queued: 'Queued',
+    idle: 'Idle',
+  };
+
+  statusEl.textContent = statusLabels[status] || status;
+  if (duration && outEl) outEl.textContent = `${duration}ms`;
+
+  // Show key output in node
+  if (outEl && data) {
+    if (agent === 'monitoring' && data.type) {
+      outEl.textContent = `${data.type}\n${data.score ? data.score.toFixed(3) : ''}`;
+    } else if (agent === 'rca' && data.category) {
+      outEl.textContent = `${data.category}\n${data.confidence ? (data.confidence*100).toFixed(0)+'%' : ''}`;
+    } else if (agent === 'planning' && data.title) {
+      outEl.textContent = `${data.steps} steps\n[${data.source}]`;
+    } else if (agent === 'sla' && data.priority) {
+      outEl.textContent = data.priority + (data.fastTrack ? '\n⚡FAST' : '');
+    } else if (agent === 'decision' && data.action) {
+      outEl.textContent = `${data.action}\n${data.riskScore !== undefined ? 'risk:'+data.riskScore : ''}`;
+    } else if (agent === 'execution') {
+      outEl.textContent = `${data.stepsCompleted || 0}/${(data.stepsCompleted || 0) + (data.stepsFailed || 0)} steps`;
+    } else if (agent === 'feedback' && data.outcome) {
+      outEl.textContent = data.outcome;
+    }
+  }
+}
+
+function setConnectorActive(agent) {
+  const id = CONNECTOR_MAP[agent];
+  if (id) {
+    // Set previous connector to 'flow'
+    const prevAgentIdx = AGENTS.indexOf(agent) - 1;
+    if (prevAgentIdx >= 0) {
+      const prevId = CONNECTOR_MAP[AGENTS[prevAgentIdx]];
+      if (prevId) {
+        const el = document.getElementById(prevId);
+        if (el) el.className = 'connector flow';
+      }
+    }
+  }
+}
+
+function setConnectorDone(agent, status) {
+  const connId = CONNECTOR_MAP[agent];
+  if (connId) {
+    const el = document.getElementById(connId);
+    if (el) el.className = `connector ${status === 'done' ? 'done' : 'error'}`;
+  }
+}
+
+// ── Incident Panel ─────────────────────────────────────────
+function renderIncidentPanel() {
+  const body = document.getElementById('incident-body');
+  const state = uiState.activeIncident;
+
+  if (!state && !uiState.activeIncidentId) {
+    body.innerHTML = `<div class="empty-state"><div class="empty-icon">🛡️</div><p>No active incident detected.</p><p style="margin-top:6px;">Click a scenario below to start the AI pipeline.</p></div>`;
+    return;
+  }
+
+  if (!state) {
+    body.innerHTML = `<div class="empty-state"><div class="empty-icon"><span class="spin">⟳</span></div><p>Pipeline starting...</p></div>`;
+    return;
+  }
+
+  const issue = state.issue;
+  const rootCause = state.rootCause;
+  const plan = state.plan;
+  const decision = state.decisionResult;
+  const risk = state.riskAssessment;
+
+  let html = '';
+
+  // Header
+  html += `<div class="inc-header">
+    <div>
+      <div class="inc-id">${state.incidentId}</div>
+      <div class="inc-title">${issue ? issue.type.replace(/_/g,' ') : 'Analyzing...'}</div>
+      <div class="inc-meta">${issue ? `${issue.affectedService} · ${state.rawEvents ? state.rawEvents[0]?.source?.namespace || 'production' : 'production'}` : ''}</div>
+    </div>
+    <div class="badges">
+      ${issue ? `<span class="badge badge-${issue.severity}">${issue.severity}</span>` : ''}
+      ${state.priority ? `<span class="badge badge-${state.priority.toLowerCase()}">${state.priority}</span>` : ''}
+      ${state.workflowStatus === 'completed' || state.outcome ? `<span class="badge badge-${state.outcome}">${state.outcome}</span>` : `<span class="badge badge-running">${state.workflowStatus}</span>`}
+    </div>
+  </div>`;
+
+  // Info grid
+  if (issue) {
+    html += `<div class="info-grid">
+      <div class="info-item">
+        <div class="info-label">Anomaly Score</div>
+        <div class="info-value">${issue.anomalyScore.toFixed(4)}</div>
+      </div>
+      <div class="info-item">
+        <div class="info-label">Affected Service</div>
+        <div class="info-value info-mono">${issue.affectedService}</div>
+      </div>`;
+    if (rootCause) {
+      html += `
+      <div class="info-item">
+        <div class="info-label">Root Cause</div>
+        <div class="info-value">${rootCause.category.replace(/_/g,' ')}</div>
+      </div>
+      <div class="info-item">
+        <div class="info-label">RCA Confidence</div>
+        <div class="info-value">${(rootCause.confidence * 100).toFixed(0)}%</div>
+      </div>`;
+    }
+    if (plan) {
+      html += `
+      <div class="info-item">
+        <div class="info-label">Plan Source</div>
+        <div class="info-value"><span class="badge badge-${state.planSource || 'llm'}" style="font-size:10px;">${(state.planSource || 'llm').toUpperCase()}</span></div>
+      </div>
+      <div class="info-item">
+        <div class="info-label">Risk Level</div>
+        <div class="info-value">${plan.riskLevel}</div>
+      </div>`;
+    }
+    if (risk) {
+      html += `
+      <div class="info-item" style="grid-column:1/-1;">
+        <div class="info-label">Risk Score — ${risk.tier.toUpperCase()} tier</div>
+        <div class="risk-meter" style="margin-top:6px;">
+          <div class="risk-fill risk-${risk.score < 35 ? 'low' : risk.score < 65 ? 'medium' : 'high'}" style="width:${risk.score}%"></div>
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px;">${risk.score}/100${decision ? ` · ${decision.action}: ${decision.reason}` : ''}</div>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Timeline
+  html += `<div style="margin-bottom:12px;">
+    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);margin-bottom:8px;">Pipeline Timeline</div>
+    <ul class="timeline" id="timeline-list">${renderTimelineItems()}</ul>
+  </div>`;
+
+  // Execution steps
+  if (Object.keys(uiState.execSteps).length > 0 || (state.plan && state.plan.steps.length > 0)) {
+    html += `<div>
+      <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);margin-bottom:8px;">Execution Steps</div>
+      <div class="exec-steps" id="exec-steps-list">${renderExecStepsHTML(state)}</div>
+    </div>`;
+  }
+
+  // Outcome
+  if (state.outcome) {
+    const icons = { resolved: '✅', escalated: '⚠️', failed: '❌', partial: '⚠️' };
+    const dur = ((new Date(state.updatedAt).getTime() - new Date(state.createdAt).getTime()) / 1000).toFixed(1);
+    html += `<div class="outcome-card ${state.outcome}">
+      <div class="outcome-icon">${icons[state.outcome] || '❓'}</div>
+      <div class="outcome-title">${state.outcome.toUpperCase()}</div>
+      <div class="outcome-meta">Resolved in ${dur}s · ${state.retryCount > 0 ? state.retryCount + ' retry(s) · ' : ''}${state.stepsCompleted.length} steps completed</div>
+    </div>`;
+  }
+
+  body.innerHTML = html;
+}
+
+function renderTimelineItems() {
+  return uiState.timeline.map(item => `
+    <li class="timeline-item">
+      <div class="timeline-dot ${item.status}"></div>
+      <div class="timeline-content">
+        <div class="timeline-msg">${escHtml(item.msg)}</div>
+        <div class="timeline-time">${item.time}</div>
+      </div>
+    </li>
+  `).join('');
+}
+
+function renderTimeline() {
+  const el = document.getElementById('timeline-list');
+  if (el) el.innerHTML = renderTimelineItems();
+}
+
+function renderExecSteps() {
+  const el = document.getElementById('exec-steps-list');
+  if (el && uiState.activeIncident) {
+    el.innerHTML = renderExecStepsHTML(uiState.activeIncident);
+  }
+}
+
+function renderExecStepsHTML(state) {
+  if (!state.plan || !state.plan.steps.length) return '';
+  return state.plan.steps.map(step => {
+    const ev = uiState.execSteps[step.stepId];
+    const status = ev ? ev.status : (state.stepsCompleted.find(s => s.stepId === step.stepId) ? 'success' : state.stepsFailed.find(s => s.stepId === step.stepId) ? 'failed' : 'pending');
+    const icons = { running: '<span class="spin">⟳</span>', success: '✅', failed: '❌', pending: '⬜', shadow: '👁', blocked: '🚫' };
+    const output = ev ? ev.output : (state.stepsCompleted.find(s => s.stepId === step.stepId)?.result || '');
+    const dur = ev && ev.durationMs ? `${(ev.durationMs/1000).toFixed(1)}s` : '';
+    return `<div class="exec-step ${status}">
+      <span class="step-icon">${icons[status] || '⬜'}</span>
+      <div style="flex:1;min-width:0;">
+        <div class="step-action">${step.action}</div>
+        ${output ? `<div class="step-output">${escHtml(output.substring(0, 120))}</div>` : ''}
+      </div>
+      ${dur ? `<span class="step-duration">${dur}</span>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function addTimeline(msg, status) {
+  const now = new Date().toLocaleTimeString('en-US', { hour12: false });
+  uiState.timeline.push({ msg, status, time: now });
+  if (uiState.timeline.length > 50) uiState.timeline.shift();
+  renderTimeline();
+}
+
+// ── Log Stream ─────────────────────────────────────────────
+const AGENT_ICONS = {
+  monitoring: '🔍', rca: '🔎', planning: '📋', sla: '⏰', decision: '⚖️',
+  execution: '⚙️', feedback: '📚', orchestrator: '🎯', kafka: '📨', system: '💻',
+};
+
+function addLog(agent, level, message) {
+  const stream = document.getElementById('log-stream');
+  if (!stream) return;
+
+  uiState.logCount++;
+
+  // Trim old logs
+  while (stream.children.length > uiState.maxLogs) {
+    stream.removeChild(stream.firstChild);
+  }
+
+  const ts = new Date().toLocaleTimeString('en-US', { hour12: false, fractionalSecondDigits: 2 });
+  const icon = AGENT_ICONS[agent] || '•';
+  const agentName = (agent || 'system').padEnd(12).substring(0, 12);
+
+  const el = document.createElement('div');
+  el.className = `log-entry ${level || 'info'}`;
+  el.innerHTML = `<span class="log-ts">${ts}</span><span class="log-agent">${icon} ${agentName}</span><span class="log-msg">${escHtml(message)}</span>`;
+  stream.appendChild(el);
+
+  const countEl = document.getElementById('log-count');
+  if (countEl) countEl.textContent = `(${uiState.logCount})`;
+
+  if (uiState.autoScroll) stream.scrollTop = stream.scrollHeight;
+}
+
+function clearLogs() {
+  const stream = document.getElementById('log-stream');
+  if (stream) stream.innerHTML = '';
+  uiState.logCount = 0;
+  const countEl = document.getElementById('log-count');
+  if (countEl) countEl.textContent = '';
+}
+
+function toggleAutoScroll() {
+  uiState.autoScroll = !uiState.autoScroll;
+  const btn = document.getElementById('scroll-btn');
+  btn.textContent = uiState.autoScroll ? '⏸ Pause' : '▶ Resume';
+}
+
+// ── Scenario Trigger ───────────────────────────────────────
+async function trigger(scenario, btn) {
+  if (uiState.pipelineRunning) return;
+
+  // Disable all buttons
+  document.querySelectorAll('.scenario-btn').forEach(b => {
+    b.disabled = true;
+  });
+
+  if (btn) {
+    btn.classList.add('loading');
+    uiState.triggerBtn = btn;
+  }
+
+  addLog('system', 'info', `Triggering scenario: ${scenario}`);
+
+  try {
+    const res = await fetch('/api/simulate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scenario, eventCount: 30 }),
+    });
+    const data = await res.json();
+    if (data.incidentId) {
+      uiState.activeIncidentId = data.incidentId;
+      addLog('system', 'info', `Pipeline started: ${data.incidentId}`);
+    }
+  } catch (err) {
+    addLog('system', 'error', `Failed to trigger: ${err.message}`);
+    enableScenarioButtons();
+  }
+}
+
+function enableScenarioButtons() {
+  document.querySelectorAll('.scenario-btn').forEach(b => {
+    b.disabled = false;
+    b.classList.remove('loading');
+  });
+  uiState.triggerBtn = null;
+}
+
+// ── Metrics ────────────────────────────────────────────────
+async function loadMetrics() {
+  try {
+    const res = await fetch('/api/metrics');
+    const data = await res.json();
+    updateMetricsDisplay(data);
+  } catch { /* ignore */ }
+}
+
+function updateMetricsDisplay(data) {
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  const total = data.incidentsTotal || data.totalIncidents || 0;
+  const resolved = data.incidentsResolved || data.resolvedAutomatically || 0;
+  const rate = data.autoResolutionRate || 0;
+  const mttr = data.avgMttrSeconds || data.averageMTTR || 0;
+
+  set('m-total', total);
+  set('m-total-sub', resolved > 0 ? `${resolved} auto-resolved` : 'no data yet');
+  set('m-rate', total > 0 ? `${(rate * 100).toFixed(0)}%` : '—');
+  set('m-resolved-sub', `${resolved} of ${total} incidents`);
+  set('m-mttr', mttr > 0 ? `${mttr}s` : '—');
+}
+
+// ── Incidents Table ────────────────────────────────────────
+async function loadIncidents() {
+  try {
+    const res = await fetch('/api/incidents?limit=20');
+    const data = await res.json();
+    renderIncidentsTable(data.incidents || []);
+  } catch {
+    // Fallback: no data
+    document.getElementById('incidents-tbody').innerHTML =
+      '<tr><td colspan="9" class="no-incidents">Unable to load incidents. Is PostgreSQL running?</td></tr>';
+  }
+}
+
+function renderIncidentsTable(incidents) {
+  const tbody = document.getElementById('incidents-tbody');
+  if (!incidents || incidents.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="no-incidents">No incidents yet. Trigger a scenario above.</td></tr>';
+    return;
+  }
+
+  const outcomeIcon = { resolved: '✅', escalated: '⚠️', failed: '❌', partial: '⚠️' };
+  const severityBadge = { critical: 'crit', high: 'high', medium: 'med', low: 'low' };
+
+  tbody.innerHTML = incidents.map(inc => {
+    const created = inc.createdAt || inc.created_at;
+    const time = created ? new Date(created).toLocaleTimeString('en-US', { hour12: false }) : '—';
+    const date = created ? new Date(created).toLocaleDateString() : '';
+    const severity = inc.severity || '—';
+    const rootCat = (inc.rootCauseCategory || inc.root_cause_category || '—').replace(/_/g, ' ');
+    const service = inc.rootCauseService || inc.root_cause_service || '—';
+    const priority = inc.priority || '—';
+    const execStatus = inc.executionStatus || inc.execution_status || '—';
+    const outcome = inc.outcome || '—';
+    const dur = inc.durationSeconds || inc.duration_seconds;
+    const incId = inc.incidentId || inc.id || '—';
+
+    return `<tr>
+      <td class="mono">${incId.substring(0, 14)}</td>
+      <td><span title="${date}">${time}</span></td>
+      <td>${rootCat}</td>
+      <td class="mono">${service}</td>
+      <td>${severity !== '—' ? `<span class="badge badge-${severityBadge[severity] || ''}">${severity}</span>` : '—'}</td>
+      <td>${priority !== '—' ? `<span class="badge badge-${priority.toLowerCase()}">${priority}</span>` : '—'}</td>
+      <td class="mono">${execStatus}</td>
+      <td>${outcome !== '—' ? `${outcomeIcon[outcome] || '❓'} ${outcome}` : '—'}</td>
+      <td class="dur">${dur ? dur + 's' : '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Utils ──────────────────────────────────────────────────
+function escHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Load exec mode from API
+async function loadSystemInfo() {
+  try {
+    const res = await fetch('/api/health');
+    const data = await res.json();
+    if (data.services && data.services.executionMode) {
+      document.getElementById('exec-mode').textContent = data.services.executionMode + ' mode';
+    }
+  } catch { /* ignore */ }
+}
+
+// ── Init ───────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  initClock();
+  connectWs();
+  loadMetrics();
+  loadIncidents();
+  loadSystemInfo();
+
+  // Refresh metrics & incidents periodically
+  setInterval(loadMetrics, 30000);
+  setInterval(loadIncidents, 60000);
+});
+</script>
+</body>
+</html>
