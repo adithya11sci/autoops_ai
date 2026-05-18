@@ -285,6 +285,43 @@ main { max-width: 1600px; margin: 0 auto; padding: 20px 24px 40px; }
 .outcome-icon-sm { font-size: 14px; }
 .no-incidents { text-align: center; padding: 40px; color: var(--muted); font-size: 13px; }
 
+/* ── Approval Banner ─────────────────────────── */
+#approval-banner {
+  display: none;
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 999;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(4px);
+  align-items: center; justify-content: center;
+}
+#approval-banner.visible { display: flex; animation: fadeIn 0.25s ease; }
+.approval-card {
+  background: var(--surface); border: 2px solid var(--warn);
+  border-radius: 14px; padding: 32px 36px; max-width: 520px; width: 90%;
+  box-shadow: 0 8px 40px rgba(210,153,34,0.3);
+  animation: slideUp 0.3s cubic-bezier(.4,0,.2,1);
+}
+@keyframes slideUp { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+.approval-header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+.approval-icon { font-size: 36px; }
+.approval-title { font-size: 20px; font-weight: 700; color: var(--warn); }
+.approval-subtitle { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.approval-details { background: var(--surface2); border-radius: 8px; padding: 14px 16px; margin-bottom: 20px; }
+.approval-detail-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 12px; }
+.approval-detail-row:last-child { margin-bottom: 0; }
+.approval-detail-label { color: var(--muted); }
+.approval-detail-value { font-weight: 600; font-family: var(--mono); }
+.approval-risk-score { color: var(--danger); font-size: 18px; font-weight: 700; }
+.approval-reason { font-size: 12px; color: var(--muted); margin-bottom: 20px; line-height: 1.6; padding: 10px 14px; border-left: 3px solid var(--warn); background: var(--warn-dim); border-radius: 0 6px 6px 0; }
+.approval-actions { display: flex; gap: 12px; }
+.approval-btn { flex: 1; padding: 12px; border-radius: 8px; font-size: 14px; font-weight: 700; cursor: pointer; border: 2px solid; transition: all 0.2s; font-family: var(--font); }
+.approval-btn-approve { background: var(--success-dim); border-color: var(--success); color: var(--success); }
+.approval-btn-approve:hover { background: var(--success); color: #000; }
+.approval-btn-reject { background: var(--danger-dim); border-color: var(--danger); color: var(--danger); }
+.approval-btn-reject:hover { background: var(--danger); color: #fff; }
+.approval-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.approval-timer { text-align: center; font-size: 11px; color: var(--muted); margin-top: 14px; }
+
 /* ── Scrollbar ───────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
@@ -323,6 +360,47 @@ main { max-width: 1600px; margin: 0 auto; padding: 20px 24px 40px; }
     <div id="clock">--:--:--</div>
   </div>
 </header>
+
+<!-- ── Approval Modal ──────────────────────────────────────── -->
+<div id="approval-banner" role="dialog" aria-modal="true" aria-labelledby="approval-title">
+  <div class="approval-card">
+    <div class="approval-header">
+      <div class="approval-icon">🧑‍⚖️</div>
+      <div>
+        <div class="approval-title" id="approval-title">Human Approval Required</div>
+        <div class="approval-subtitle" id="approval-incident-id"></div>
+      </div>
+    </div>
+    <div class="approval-details">
+      <div class="approval-detail-row">
+        <span class="approval-detail-label">Risk Score</span>
+        <span class="approval-detail-value approval-risk-score" id="approval-risk-score">—</span>
+      </div>
+      <div class="approval-detail-row">
+        <span class="approval-detail-label">Risk Tier</span>
+        <span class="approval-detail-value" id="approval-risk-tier">—</span>
+      </div>
+      <div class="approval-detail-row">
+        <span class="approval-detail-label">Service</span>
+        <span class="approval-detail-value" id="approval-service">—</span>
+      </div>
+      <div class="approval-detail-row">
+        <span class="approval-detail-label">Fix Plan</span>
+        <span class="approval-detail-value" id="approval-plan-title">—</span>
+      </div>
+    </div>
+    <div class="approval-reason" id="approval-reason"></div>
+    <div class="approval-actions">
+      <button class="approval-btn approval-btn-approve" id="approval-approve-btn" onclick="submitApproval('APPROVED')">
+        ✅ Approve &amp; Execute
+      </button>
+      <button class="approval-btn approval-btn-reject" id="approval-reject-btn" onclick="submitApproval('DENIED')">
+        ❌ Reject
+      </button>
+    </div>
+    <div class="approval-timer" id="approval-timer">Waiting for operator decision…</div>
+  </div>
+</div>
 
 <main>
 
@@ -539,6 +617,7 @@ const uiState = {
   timeline: [],
   triggerBtn: null,
   pipelineRunning: false,
+  pendingApprovalId: null,
 };
 
 // ── Clock ──────────────────────────────────────────────────
@@ -550,6 +629,94 @@ function initClock() {
   }
   tick();
   setInterval(tick, 1000);
+}
+
+// ── Approval Flow ──────────────────────────────────────────
+function onApprovalRequired(data) {
+  uiState.pendingApprovalId = data.approvalId;
+
+  document.getElementById('approval-incident-id').textContent =
+    `Incident: ${data.incidentId} | Approval: ${data.approvalId}`;
+  document.getElementById('approval-risk-score').textContent =
+    `${data.riskScore}/100`;
+  document.getElementById('approval-risk-tier').textContent =
+    (data.riskTier || 'block').toUpperCase();
+  document.getElementById('approval-service').textContent =
+    data.serviceName || '—';
+  document.getElementById('approval-plan-title').textContent =
+    data.planTitle || '—';
+  document.getElementById('approval-reason').textContent =
+    data.reason || 'High-risk operation blocked by AI — operator review required.';
+
+  const approveBtn = document.getElementById('approval-approve-btn');
+  const rejectBtn = document.getElementById('approval-reject-btn');
+  approveBtn.disabled = false;
+  rejectBtn.disabled = false;
+
+  document.getElementById('approval-timer').textContent =
+    'Waiting for operator decision… (10 min timeout)';
+
+  document.getElementById('approval-banner').classList.add('visible');
+
+  addTimeline('⏳ AWAITING HUMAN APPROVAL — operator must approve or reject', 'warn');
+  addLog('decision', 'warn', `Human approval required for ${data.serviceName} — risk score ${data.riskScore}/100`);
+}
+
+function onApprovalDecided(data) {
+  document.getElementById('approval-banner').classList.remove('visible');
+  uiState.pendingApprovalId = null;
+
+  const label = data.decision === 'approved' ? 'APPROVED' : data.decision.toUpperCase();
+  const status = data.decision === 'approved' ? 'done' : 'warn';
+  addTimeline(`Human decision: ${label} — pipeline ${data.decision === 'approved' ? 'proceeding to execution' : 'escalated'}`, status);
+}
+
+async function submitApproval(decision) {
+  const approvalId = uiState.pendingApprovalId;
+  if (!approvalId) return;
+
+  const approveBtn = document.getElementById('approval-approve-btn');
+  const rejectBtn = document.getElementById('approval-reject-btn');
+  approveBtn.disabled = true;
+  rejectBtn.disabled = true;
+  document.getElementById('approval-timer').textContent = 'Submitting decision…';
+
+  try {
+    const resp = await fetch(`/api/v1/approvals/${approvalId}/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        decision,
+        approverId: 'dashboard-operator',
+        comment: decision === 'APPROVED'
+          ? 'Approved via dashboard — operator reviewed and accepted risk'
+          : 'Rejected via dashboard — operator declined execution',
+      }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: resp.statusText }));
+      document.getElementById('approval-timer').textContent = `Error: ${err.error}`;
+      approveBtn.disabled = false;
+      rejectBtn.disabled = false;
+      return;
+    }
+
+    document.getElementById('approval-timer').textContent =
+      `Decision submitted: ${decision}`;
+
+    addLog('decision', decision === 'APPROVED' ? 'info' : 'warn',
+      `Operator ${decision} execution via dashboard`);
+
+    setTimeout(() => {
+      document.getElementById('approval-banner').classList.remove('visible');
+    }, 1500);
+
+  } catch (err) {
+    document.getElementById('approval-timer').textContent = `Network error: ${err.message}`;
+    approveBtn.disabled = false;
+    rejectBtn.disabled = false;
+  }
 }
 
 // ── WebSocket ──────────────────────────────────────────────
@@ -630,6 +797,12 @@ function handleMessage(msg) {
     case 'metrics_update':
       updateMetricsDisplay(msg.payload);
       break;
+    case 'approval_required':
+      onApprovalRequired(msg.payload);
+      break;
+    case 'approval_decided':
+      onApprovalDecided(msg.payload);
+      break;
   }
 }
 
@@ -678,7 +851,9 @@ function onAgentComplete(data) {
   } else if (data.agent === 'decision') {
     const act = d.action || 'unknown';
     const score = d.riskScore !== undefined ? ` | risk: ${d.riskScore}/100` : '';
-    addTimeline(`Decision: ${act.toUpperCase()}${score}`, act === 'execute' || act === 'execute_notify' ? 'done' : 'error');
+    const decStatus = act === 'execute' || act === 'execute_notify' ? 'done'
+      : act === 'block' || act === 'escalate_human' ? 'warn' : 'error';
+    addTimeline(`Decision: ${act.toUpperCase()}${score}`, decStatus);
   } else if (data.agent === 'execution') {
     addTimeline(`Execution: ${d.stepsCompleted} done, ${d.stepsFailed} failed (${d.status})`,
       d.status === 'success' ? 'done' : d.status === 'partial' ? 'warn' : 'error');

@@ -20,11 +20,14 @@ import { DecisionEngine } from "../engines/decision.engine";
 import { CommandValidatorService } from "../services/command-validator.service";
 import { RiskService } from "../services/risk.service";
 import { ApprovalService } from "../services/approval.service";
+import { FixPlan } from "../services/enterprise-types";
 import {
     broadcast,
     broadcastLog,
     recordPipelineStart,
     recordPipelineComplete,
+    setPendingApproval,
+    clearPendingApproval,
 } from "../services/broadcast";
 
 const log = createChildLogger("Orchestrator");
@@ -178,10 +181,86 @@ export async function runPipeline(rawEvents: RawEvent[], existingState?: Inciden
                 notifyListeners(state);
 
                 if (decisionResult.action === "block" || decisionResult.action === "escalate_human") {
-                    log.warn({ action: decisionResult.action, reason: decisionResult.reason }, `🚫 Decision: BLOCKED`);
-                    state.workflowStatus = "escalated";
-                    state.outcome = "escalated";
-                    break;
+                    log.warn({ action: decisionResult.action, reason: decisionResult.reason }, `🚫 Decision: BLOCKED — requesting human approval`);
+
+                    const fixPlan: FixPlan = {
+                        title: state.plan?.title || "Unknown Fix",
+                        fixSteps: (state.plan?.steps || []).map(s => ({
+                            action: s.action,
+                            command: (s.parameters?.command as string) || s.action,
+                            description: s.description,
+                            estimatedDurationSec: s.timeoutSeconds,
+                        })),
+                        confidence: 0.5,
+                        blastRadius: state.riskAssessment?.score ?? 100,
+                        hasRollbackPlan: (state.plan?.rollbackPlan?.length ?? 0) > 0,
+                        riskLevel: state.plan?.riskLevel,
+                        rollbackPlan: state.plan?.rollbackPlan,
+                    };
+
+                    const serviceName = state.issue?.affectedService || state.rootCause?.service || "unknown";
+                    const namespace = state.rawEvents[0]?.source?.namespace || "production";
+
+                    try {
+                        const approvalId = await approvalService.createRequest(
+                            fixPlan,
+                            state.riskAssessment || { score: 100, tier: "block", reasons: [decisionResult.reason], requiresApproval: true, source: "llm" },
+                            state.incidentId,
+                            serviceName,
+                            namespace,
+                            state.fixId || null,
+                        );
+
+                        state.approvalId = approvalId;
+                        state.workflowStatus = "awaiting_approval";
+                        notifyListeners(state);
+
+                        const approvalPayload = {
+                            incidentId: state.incidentId,
+                            approvalId,
+                            reason: decisionResult.reason,
+                            riskScore: state.riskAssessment?.score ?? 100,
+                            riskTier: state.riskAssessment?.tier || "block",
+                            serviceName,
+                            planTitle: state.plan?.title || "Unknown Fix",
+                        };
+                        setPendingApproval(approvalPayload);
+                        broadcast("approval_required", approvalPayload);
+
+                        broadcastLog("decision", "warn",
+                            `Human approval required — waiting for operator decision`,
+                            { approvalId, riskScore: state.riskAssessment?.score }
+                        );
+
+                        log.warn({ approvalId }, "⏳ Awaiting human approval...");
+
+                        const humanDecision = await approvalService.waitForDecision(approvalId);
+
+                        clearPendingApproval();
+                        broadcast("approval_decided", {
+                            incidentId: state.incidentId,
+                            approvalId,
+                            decision: humanDecision,
+                        });
+
+                        if (humanDecision === "approved") {
+                            broadcastLog("decision", "info", `Human APPROVED — proceeding to execution`, { approvalId });
+                            log.info({ approvalId }, "✅ Human approved — proceeding to execution");
+                            // fall through to execution
+                        } else {
+                            broadcastLog("decision", "warn", `Human ${humanDecision.toUpperCase()} — escalating incident`, { approvalId });
+                            log.warn({ approvalId, humanDecision }, `❌ ${humanDecision.toUpperCase()} — escalating`);
+                            state.workflowStatus = "escalated";
+                            state.outcome = "escalated";
+                            break;
+                        }
+                    } catch (approvalErr: any) {
+                        log.error({ err: approvalErr.message }, "Approval flow failed — escalating for safety");
+                        broadcastLog("decision", "error", `Approval flow failed — escalating: ${approvalErr.message}`);
+                        state.workflowStatus = "escalated";
+                        state.outcome = "escalated";
+                        break;
+                    }
                 }
 
                 log.info({ action: decisionResult.action }, `✅ Decision: ${decisionResult.action.toUpperCase()}`);

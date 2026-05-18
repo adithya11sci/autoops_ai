@@ -77,7 +77,7 @@ export interface StepResult {
 }
 
 export type Priority = "P0" | "P1" | "P2" | "P3" | "P4";
-export type WorkflowStatus = "created" | "monitoring" | "analyzing" | "planning" | "prioritizing" | "executing" | "learning" | "completed" | "failed" | "escalated";
+export type WorkflowStatus = "created" | "monitoring" | "analyzing" | "planning" | "prioritizing" | "executing" | "learning" | "completed" | "failed" | "escalated" | "awaiting_approval";
 export type ExecutionStatus = "pending" | "running" | "success" | "partial" | "failed";
 
 export interface IncidentState {

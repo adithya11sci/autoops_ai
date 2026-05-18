@@ -27,6 +27,17 @@ const metrics = {
 // Connected WebSocket clients
 const clients = new Set<WsClient>();
 
+// Pending approval — replayed to new clients so they never miss a waiting approval
+let pendingApproval: unknown | null = null;
+
+export function setPendingApproval(data: unknown): void {
+    pendingApproval = data;
+}
+
+export function clearPendingApproval(): void {
+    pendingApproval = null;
+}
+
 // ── Client Management ─────────────────────────────
 
 export function addWsClient(socket: WsClient): void {
@@ -50,6 +61,17 @@ export function addWsClient(socket: WsClient): void {
             ts: Date.now(),
         }));
     } catch { /* ignore */ }
+
+    // Replay any in-flight approval so the browser never misses it
+    if (pendingApproval) {
+        try {
+            socket.send(JSON.stringify({
+                type: "approval_required",
+                payload: pendingApproval,
+                ts: Date.now(),
+            }));
+        } catch { /* ignore */ }
+    }
 }
 
 export function getClientCount(): number {
