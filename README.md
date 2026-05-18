@@ -2,7 +2,7 @@
 
 > **Intelligent Incident Detection & Resolution powered by LangGraph Multi-Agent Framework**
 
-![System Architecture](docs/diagrams/system_architecture.png)
+![System Architecture](docs/diagrams/system_architecture.png?v=2)
 
 ---
 
