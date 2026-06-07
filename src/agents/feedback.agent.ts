@@ -7,6 +7,7 @@ import { saveIncident, logAgentEvent } from "../services/database";
 import { storeIncident } from "../services/chroma.client";
 import { createChildLogger } from "../utils/logger";
 import { MemoryService } from "../services/memory.service";
+import { IncidentContext, FixPlan } from "../services/enterprise-types";
 
 const log = createChildLogger("FeedbackAgent");
 const memoryService = new MemoryService();
@@ -122,6 +123,37 @@ export async function feedbackAgent(state: IncidentState): Promise<IncidentState
         },
         `📊 Feedback complete: ${outcome.toUpperCase()}`
     );
+
+    // Step 6: Store resolved fix in memory service so future identical incidents use cache
+    if (outcome === "resolved" && state.plan && state.issue && state.rootCause) {
+        try {
+            const incidentContext: IncidentContext = {
+                id: state.incidentId,
+                incidentType: state.issue.type,
+                errorSignature: state.rootCause.category,
+                severity: state.issue.severity as IncidentContext["severity"],
+                affectedService: state.issue.affectedService,
+            };
+            const fixPlan: FixPlan = {
+                title: state.plan.title,
+                fixSteps: state.plan.steps.map((s) => ({
+                    action: s.action,
+                    command: s.description || s.action,
+                    estimatedDurationSec: s.timeoutSeconds,
+                    rollbackCommand: s.rollback,
+                })),
+                confidence: 0.8,
+                blastRadius: 2,
+                hasRollbackPlan: state.plan.rollbackPlan.length > 0,
+            };
+            const fixId = await memoryService.storeFix(incidentContext, fixPlan);
+            state.fixId = fixId;
+            log.info({ fixId, incidentType: state.issue.type }, "✅ Fix stored in memory — next identical incident will use cache");
+        } catch (err: unknown) {
+            const error = err as Error;
+            log.warn({ err: error.message }, "Failed to store fix in memory (non-fatal)");
+        }
+    }
 
     // === ENTERPRISE ADDITION START ===
     // Fire-and-forget RL score update for memory-sourced fixes

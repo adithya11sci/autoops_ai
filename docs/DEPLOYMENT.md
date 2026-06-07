@@ -1,73 +1,98 @@
 # 🚀 AutoOps AI — Deployment Guide
 
+> **No Docker required.** The system runs fully standalone using in-process replacements
+> for Redis, ChromaDB, and Kafka.
+
 ---
 
 ## Prerequisites
 
-- Node.js 18+ and npm
-- Docker and Docker Compose
-- Groq API key ([console.groq.com](https://console.groq.com))
+| Requirement | Version | Notes |
+|---|---|---|
+| Node.js | v22.x | Portable — no installation needed (see below) |
+| Groq API Key | — | Free at [console.groq.com](https://console.groq.com) |
+| Corporate CA cert | — | Auto-exported by start.ps1 for SSL proxy environments |
 
 ---
 
-## Local Development Setup
+## Quick Start (No Docker, No Admin Rights)
 
-### 1. Clone & Configure
+### 1. Configure Environment
 
-```bash
-git clone https://github.com/adithya11sci/autoops_ai.git
-cd autoops_ai
+```powershell
+# Copy example config
 cp .env.example .env
-# Edit .env → set GROQ_API_KEY
+
+# Edit .env — set your Groq API key
+GROQ_API_KEY=gsk_your_key_here
 ```
 
-### 2. Start Infrastructure
+### 2. Install Dependencies
 
-```bash
-docker-compose up -d
-# Starts: PostgreSQL, Kafka, ChromaDB
+```powershell
+$node = "C:\Users\<you>\node-portable\node-v22.15.0-win-x64"
+& "$node\node.exe" .\node_modules\npm\bin\npm-cli.js install
 ```
 
-### 3. Install & Run
+### 3. Start the System
 
-```bash
-npm install
-npm run dev
+```powershell
+.\start.ps1
 ```
 
-### 4. Test the Pipeline
+The script handles:
+- Setting `NODE_EXTRA_CA_CERTS` → exports Windows trusted root CAs to `corporate-ca.pem` for SSL proxy environments
+- Setting `PATH` to the portable Node.js binary
+- Starting the server with `tsx` (TypeScript runner — no compile step needed)
 
-```bash
-# Simulate incidents
-npm run simulate
+### 4. Verify Running
 
-# Or use API
-curl -X POST http://localhost:3000/api/simulate \
-  -H "Content-Type: application/json" \
-  -d '{"scenario": "oom_kill", "eventCount": 50}'
+```powershell
+# Health check
+curl http://localhost:3000/api/health
+
+# Check all in-process services
+curl http://localhost:3000/api/debug/stores
+```
+
+### 5. Trigger a Test Incident
+
+```powershell
+curl -X POST http://localhost:3000/api/simulate `
+  -H "Content-Type: application/json" `
+  -d '{"scenario":"oom_kill","eventCount":30}'
 ```
 
 ---
 
-## Docker Deployment
+## What Runs Without Docker
 
-```bash
-# Build the application
-docker build -t autoops-ai:latest .
-
-# Run everything
-docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-```
+| Service | Docker Version | No-Docker Version | Status |
+|---|---|---|---|
+| **ChromaDB** | External server port 8000 | In-process TF-IDF vector store | ✅ Full similarity search |
+| **Redis** | External server port 6379 | In-process TTL Map (30-min cache) | ✅ Full caching |
+| **Kafka** | External broker port 9092 | In-process EventEmitter bus | ✅ Same handler, same flow |
+| **PostgreSQL** | External server port 5432 | In-memory store with same API | ✅ Full CRUD |
+| **Groq LLM** | Cloud API | Cloud API (SSL fixed) | ✅ Real AI calls |
 
 ---
 
-## Kubernetes Deployment
+## SSL Corporate Proxy Fix
 
-```bash
-# Apply manifests
-kubectl apply -f infrastructure/kubernetes/namespace.yaml
-kubectl apply -f infrastructure/kubernetes/
+In enterprise/lab environments with SSL inspection proxies, Node.js rejects HTTPS calls with:
 ```
+Error: unable to get local issuer certificate
+```
+
+`start.ps1` automatically fixes this by exporting Windows trusted root CAs:
+
+```powershell
+# Exports 52 corporate root CAs to a PEM file
+# Sets NODE_EXTRA_CA_CERTS so Node.js trusts the proxy
+$env:NODE_EXTRA_CA_CERTS = "$PSScriptRoot\corporate-ca.pem"
+```
+
+This is the **secure** approach — it adds your corporate CA to Node.js's trust store without disabling SSL verification.
 
 ---
 
@@ -75,31 +100,83 @@ kubectl apply -f infrastructure/kubernetes/
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `GROQ_API_KEY` | ✅ | — | Groq API key for LLM |
-| `POSTGRES_HOST` | — | localhost | PostgreSQL host |
-| `POSTGRES_PORT` | — | 5432 | PostgreSQL port |
-| `POSTGRES_DB` | — | autoops | Database name |
-| `POSTGRES_USER` | — | autoops | Database user |
-| `POSTGRES_PASSWORD` | — | autoops_secret | Database password |
-| `KAFKA_BROKERS` | — | localhost:9092 | Kafka brokers |
-| `CHROMA_HOST` | — | localhost | ChromaDB host |
-| `CHROMA_PORT` | — | 8000 | ChromaDB port |
-| `PORT` | — | 3000 | API server port |
-| `EXECUTION_MODE` | — | simulate | simulate or live |
-| `ANOMALY_THRESHOLD` | — | 0.7 | Anomaly detection threshold |
-| `MAX_RETRIES` | — | 3 | Max retry attempts |
+| `GROQ_API_KEY` | ✅ | — | Groq LLM API key |
+| `GROQ_MODEL_PLANNING` | — | `llama-3.3-70b-versatile` | Planning model |
+| `GROQ_MODEL_FAST` | — | `llama-3.1-8b-instant` | Fast model |
+| `PORT` | — | `3000` | API server port |
+| `EXECUTION_MODE` | — | `simulate` | `simulate` / `shadow` / `live` |
+| `ANOMALY_THRESHOLD` | — | `0.7` | Min score to trigger pipeline |
+| `MAX_RETRIES` | — | `3` | Max replanning attempts |
+| `VECTOR_SIMILARITY_THRESHOLD` | — | `0.82` | Min cosine similarity for memory hits |
+| `TRUST_THRESHOLD_SUCCESS_COUNT` | — | `3` | Successes before memory is "trustworthy" |
+| `APPROVAL_TIMEOUT_MS` | — | `600000` | Human approval timeout (10 min) |
+| `AUTOOPS_API_KEY` | — | — | API key for approval endpoints |
+| `REDIS_HOST` | — | `localhost` | Redis host (ignored in no-Docker mode) |
+| `REDIS_PORT` | — | `6379` | Redis port (ignored in no-Docker mode) |
+| `SLACK_WEBHOOK_URL` | — | — | Slack webhook for notifications |
 
 ---
 
-## Verification
+## Execution Modes
+
+```
+EXECUTION_MODE=simulate   ← Default. All kubectl output is realistic simulation.
+EXECUTION_MODE=shadow     ← Connects to real K8s, logs what it WOULD do (dry-run).
+EXECUTION_MODE=live       ← Actually executes on a real Kubernetes cluster.
+```
+
+---
+
+## Verification Endpoints
 
 ```bash
-# Check health
-curl http://localhost:3000/api/health
+# System health
+GET  http://localhost:3000/api/health
 
-# Check logs
-docker-compose logs -f
+# Live incident data
+GET  http://localhost:3000/api/incidents
 
-# Check Kafka topics
-docker exec autoops-kafka kafka-topics.sh --bootstrap-server localhost:9092 --list
+# Performance metrics (JSON)
+GET  http://localhost:3000/api/metrics
+
+# Prometheus metrics (for Grafana scraping)
+GET  http://localhost:3000/api/prometheus
+
+# Debug: inspect vector store, cache, and event bus contents
+GET  http://localhost:3000/api/debug/stores
+
+# Real-time WebSocket feed
+WS   ws://localhost:3000/ws
+```
+
+---
+
+## With Docker (Full Stack)
+
+When Docker is available:
+
+```bash
+# Start all external services
+docker-compose up -d
+# Starts: PostgreSQL 15, Kafka 3.6, ChromaDB, Redis
+
+# Then run the app
+npm run dev
+```
+
+The system auto-detects real services and uses them instead of in-process fallbacks.
+
+---
+
+## Kubernetes Deployment
+
+```bash
+kubectl apply -f infrastructure/kubernetes/namespace.yaml
+kubectl apply -f infrastructure/kubernetes/
+
+# Set secrets
+kubectl create secret generic autoops-secrets \
+  --from-literal=GROQ_API_KEY=gsk_... \
+  --from-literal=AUTOOPS_API_KEY=your_key \
+  -n autoops
 ```

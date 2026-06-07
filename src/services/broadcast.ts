@@ -3,9 +3,13 @@
  * Central hub for real-time event broadcasting to all connected UI clients.
  * Imported by workflow, agents, and server — no circular deps (no imports from app modules).
  */
+import fs from "fs";
+import path from "path";
 import { createChildLogger } from "../utils/logger";
 
 const log = createChildLogger("Broadcast");
+
+const METRICS_FILE = path.join(process.cwd(), "metrics.json");
 
 interface WsClient {
     readyState: number;
@@ -23,6 +27,27 @@ const metrics = {
     totalMttrMs: 0,
     resolvedCount: 0,
 };
+
+// Load persisted metrics from disk so restarts don't lose history
+(function loadMetrics() {
+    try {
+        if (fs.existsSync(METRICS_FILE)) {
+            const saved = JSON.parse(fs.readFileSync(METRICS_FILE, "utf8"));
+            Object.assign(metrics, saved);
+            // Active count can't be restored meaningfully — reset to 0
+            metrics.incidentsActive = 0;
+            log.info({ file: METRICS_FILE }, "Metrics loaded from persistence file");
+        }
+    } catch { /* start fresh on corrupt/missing file */ }
+})();
+
+function saveMetrics(): void {
+    try {
+        fs.writeFileSync(METRICS_FILE, JSON.stringify(metrics), "utf8");
+    } catch (err: unknown) {
+        log.warn({ err: (err as Error).message }, "Failed to persist metrics to file");
+    }
+}
 
 // Connected WebSocket clients
 const clients = new Set<WsClient>();
@@ -115,6 +140,7 @@ export function broadcastLog(
 export function recordPipelineStart(): void {
     metrics.incidentsTotal++;
     metrics.incidentsActive = Math.max(0, metrics.incidentsActive + 1);
+    saveMetrics();
 }
 
 export function recordPipelineComplete(outcome: string, durationMs: number): void {
@@ -128,6 +154,7 @@ export function recordPipelineComplete(outcome: string, durationMs: number): voi
     } else if (outcome === "escalated") {
         metrics.incidentsEscalated++;
     }
+    saveMetrics();
     // Broadcast updated metrics to all clients
     broadcast("metrics_update", getMetricsJson());
 }

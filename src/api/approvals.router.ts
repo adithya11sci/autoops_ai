@@ -15,6 +15,14 @@ const log = createChildLogger("ApprovalsRouter");
 // ── Auth middleware ──
 const AUTOOPS_API_KEY = process.env.AUTOOPS_API_KEY || "";
 
+if (!AUTOOPS_API_KEY) {
+    // Approval endpoints are unauthenticated — any caller can approve/deny remediations
+    console.warn(
+        "[ApprovalsRouter] WARNING: AUTOOPS_API_KEY is not set. " +
+        "Approval endpoints are open to any caller. Set AUTOOPS_API_KEY in .env to enable auth."
+    );
+}
+
 interface RateLimitEntry {
     count: number;
     resetAt: number;

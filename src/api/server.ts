@@ -27,8 +27,28 @@ import {
     getPrometheusMetrics,
     getMetricsJson,
 } from "../services/broadcast";
+import { publishEvents, bus } from "../services/kafka.service";
+import { getVectorStoreSnapshot } from "../services/chroma.client";
+import { redis } from "../services/memory.service";
 
 const log = createChildLogger("API");
+
+// Simple per-IP rate limiter for /api/simulate (10 req/min)
+const simulateRateMap = new Map<string, { count: number; resetAt: number }>();
+const SIMULATE_RATE_LIMIT = 10;
+const SIMULATE_RATE_WINDOW_MS = 60_000;
+
+function checkSimulateRateLimit(ip: string): boolean {
+    const now = Date.now();
+    const entry = simulateRateMap.get(ip);
+    if (!entry || now > entry.resetAt) {
+        simulateRateMap.set(ip, { count: 1, resetAt: now + SIMULATE_RATE_WINDOW_MS });
+        return true;
+    }
+    if (entry.count >= SIMULATE_RATE_LIMIT) return false;
+    entry.count++;
+    return true;
+}
 
 export async function createServer() {
     const app = Fastify({ logger: false });
@@ -91,6 +111,10 @@ export async function createServer() {
     app.post<{ Body: { scenario?: string; eventCount?: number; targetService?: string } }>(
         "/api/simulate",
         async (req, reply) => {
+            if (!checkSimulateRateLimit(req.ip || "unknown")) {
+                return reply.code(429).send({ error: "Rate limit exceeded. Max 10 simulations/min per IP." });
+            }
+
             const { scenario = "oom_kill", eventCount = 30, targetService } = req.body || {};
 
             log.info({ scenario, eventCount, targetService }, "Simulation triggered");
@@ -101,8 +125,9 @@ export async function createServer() {
             // Pre-register so the incident is queryable immediately
             preRegisterIncident(state);
 
-            // Fire pipeline asynchronously — UI watches WebSocket for updates
+            // Publish through in-process event bus (mirrors Kafka flow) + run pipeline
             setImmediate(() => {
+                publishEvents(config.kafka.topics.rawEvents, events).catch(() => {});
                 runPipeline(events, state).catch((err) =>
                     log.error({ err: err.message }, "Background pipeline error")
                 );
@@ -212,6 +237,33 @@ export async function createServer() {
             { id: "random", name: "Random", description: "Random incident scenario", icon: "🎲" },
         ],
     }));
+
+    // ── Debug: Inspect in-process store contents ─────────
+    app.get("/api/debug/stores", async () => {
+        const vectors = getVectorStoreSnapshot();
+        const cache   = redis.snapshot();
+        const busListeners = bus.eventNames().map((e) => ({
+            topic: e,
+            listenerCount: bus.listenerCount(e as string),
+        }));
+
+        return {
+            vectorStore: {
+                description: "ChromaDB replacement — TF-IDF cosine similarity",
+                totalDocs: vectors.length,
+                docs: vectors,
+            },
+            redisCache: {
+                description: "Redis replacement — in-process TTL Map",
+                totalKeys: cache.length,
+                entries: cache,
+            },
+            kafkaBus: {
+                description: "Kafka replacement — in-process EventEmitter",
+                topics: busListeners,
+            },
+        };
+    });
 
     // ── Root: Serve Dashboard ─────────────────────────────
     // Only register if static plugin is registered; otherwise fallback

@@ -15,6 +15,43 @@ const log = createChildLogger("GroqClient");
 // ── Re-export error types for consumers ──
 export { GroqParseError, GroqUnavailableError, GroqClientError };
 
+// ── Circuit breaker state (module-level singleton) ──
+const CIRCUIT_FAILURE_THRESHOLD = 3;
+const CIRCUIT_OPEN_MS = 5 * 60 * 1000; // 5 minutes
+
+let circuitOpen = false;
+let circuitOpenUntil = 0;
+let consecutiveFailures = 0;
+
+function checkCircuit(): void {
+    if (!circuitOpen) return;
+    if (Date.now() >= circuitOpenUntil) {
+        circuitOpen = false;
+        consecutiveFailures = 0;
+        log.info("Groq circuit breaker CLOSED — resuming LLM calls");
+        return;
+    }
+    const remainingSec = Math.ceil((circuitOpenUntil - Date.now()) / 1000);
+    const msg = `Groq circuit breaker open — skipping LLM for ${remainingSec}s`;
+    throw new GroqUnavailableError(msg, new Error(msg));
+}
+
+function recordSuccess(): void {
+    consecutiveFailures = 0;
+}
+
+function recordFailure(): void {
+    consecutiveFailures++;
+    if (consecutiveFailures >= CIRCUIT_FAILURE_THRESHOLD && !circuitOpen) {
+        circuitOpen = true;
+        circuitOpenUntil = Date.now() + CIRCUIT_OPEN_MS;
+        log.warn(
+            { openUntil: new Date(circuitOpenUntil).toISOString(), failures: consecutiveFailures },
+            "Groq circuit breaker OPENED — 3 consecutive failures"
+        );
+    }
+}
+
 // ── Config from env ──
 const GROQ_API_KEY = process.env.GROQ_API_KEY || config.groq.apiKey;
 const GROQ_MODEL_PLANNING = process.env.GROQ_MODEL_PLANNING || "llama-3.3-70b-versatile";
@@ -133,6 +170,9 @@ export class GroqClient {
         model: string,
         maxAttempts: number = 3
     ): Promise<string> {
+        // Fail fast if circuit is open
+        checkCircuit();
+
         const delays = [1000, 2000, 4000];
 
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -148,9 +188,16 @@ export class GroqClient {
                 const content = completion.choices[0]?.message?.content || "{}";
                 const tokensUsed = completion.usage?.total_tokens || 0;
                 log.info({ model, tokensUsed, attempt }, "Groq response received");
+                recordSuccess();
                 return content;
             } catch (err: unknown) {
                 const error = err as Error & { status?: number; statusCode?: number };
+
+                // Re-throw circuit breaker errors immediately (don't record as new failure)
+                if (err instanceof GroqUnavailableError && (error.message || "").includes("circuit breaker")) {
+                    throw err;
+                }
+
                 const statusCode = error.status || error.statusCode || 0;
 
                 // Rate limit — retry with backoff
@@ -163,13 +210,14 @@ export class GroqClient {
 
                 // Network error or 5xx — Groq is unavailable
                 if (statusCode === 0 || statusCode >= 500) {
+                    recordFailure();
                     throw new GroqUnavailableError(
                         `Groq unavailable: ${error.message}`,
                         error
                     );
                 }
 
-                // Other errors — throw directly
+                // Other errors — throw directly (don't count toward circuit)
                 throw new GroqClientError(
                     `Groq request failed: ${error.message}`,
                     statusCode
@@ -177,7 +225,8 @@ export class GroqClient {
             }
         }
 
-        // Should not reach here, but safety net
+        // Exhausted all retries on rate-limit
+        recordFailure();
         throw new GroqClientError("Groq request failed after all retries", 429);
     }
 

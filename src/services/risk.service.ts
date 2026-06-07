@@ -121,6 +121,16 @@ export class RiskService {
             }
         }
 
+        // OVERRIDE: OOM kill → always requires human approval at maximum risk score
+        if (
+            context.incidentType === "pod_crash" &&
+            context.errorSignature === "memory_leak"
+        ) {
+            reasons.push(`OOM kill override: score forced → 100 (memory exhaustion is highest risk — human approval mandatory)`);
+            score = 100;
+            tier = "approve";
+        }
+
         const assessment: RiskAssessment = {
             score,
             tier,

@@ -1,219 +1,266 @@
-# ⚙️ AutoOps AI — Deep Technical Implementation & Flow Guide
+# ⚙️ AutoOps AI — Technical Implementation Guide
 
-> **Target Audience:** Engineering Leadership, Principal SREs, System Architects, and Code Reviewers.
-> 
-> *This document provides an exhaustive, code-level breakdown of the mathematical models, software engineering patterns, and execution flow of the AutoOps AI agent framework. It maps exactly **how** data moves and changes state throughout the system.*
+> **Target Audience:** Engineering Leadership, Principal SREs, System Architects, Code Reviewers.
+>
+> *Exhaustive, code-level breakdown of how data moves through the system — what is real, what is simulated, and exactly how every decision is made.*
 
 ---
 
-## 1. High-Level System Architecture
+## 1. System Architecture
 
-At its core, AutoOps AI is an event-driven, multi-agent orchestration engine. We chose a microservice-like internal structure coordinated by an immutable Redux-like state graph, avoiding the brittle nature of traditional sequential runbooks.
+AutoOps AI is an event-driven, multi-agent orchestration engine. Six specialized agents work in a stateful pipeline coordinated by a Redux-like state machine (`IncidentState`). Agents cannot mutate global state directly — each returns a state patch the orchestrator merges, guaranteeing thread safety and an immutable audit trail.
 
-```mermaid
-graph TD
-    %% External Sources
-    subgraph Ingestion Layer
-        A1["Prometheus Metrics"] --> K["Apache Kafka (Topics)"]
-        A2["Fluentd Logs"] --> K
-        A3["System Alerts"] --> K
-    end
-
-    %% Gateway & Streaming
-    subgraph API & Streaming
-        K --> B["Fastify Stream Consumer"]
-        B --> |"Rate Limits & Backpressure"| C["Event Normalizer"]
-    end
-
-    %% State Orchestrator
-    subgraph LangGraph Orchestrator
-        C --> D["Monitor Agent (Anomaly ML)"]
-        D --> |"Anomaly > 0.7"| E["RCA Agent (Graph Traversal)"]
-        E --> F["Planning Agent (RAG)"]
-        F --> G["SLA Agent (Risk Scoring)"]
-        G --> H["Approval Gate (Human in the Loop)"]
-        H --> I["Execution Agent (Templates)"]
-        I --> J["Feedback Agent (Learning)"]
-        
-        %% Lifecycle Loops
-        I -.->|"Retry / Failure Context"| F
-    end
-
-    %% Persistent Storage
-    subgraph Persistence & Memory
-        F <-->|"KNN Search / Injection"| V[(ChromaDB Vector Store)]
-        J -->|"Embed Lessons Learned"| V
-        J -->|"Audit Logs"| P[(PostgreSQL)]
-    end
-    
-    %% Execution Envelope
-    I --> |"Shell / API Call"| X["Docker / K8s Cluster"]
-
-    classDef core fill:#0b3d91,stroke:#0f52ba,stroke-width:2px,color:#fff;
-    classDef agent fill:#228b22,stroke:#32cd32,stroke-width:2px,color:#fff;
-    classDef db fill:#8b0000,stroke:#dc143c,stroke-width:2px,color:#fff;
-    
-    class D,E,F,G,H,I,J agent;
-    class V,P db;
+```
+Raw Events (HTTP/EventBus)
+        ↓
+  Monitoring Agent      ← Ensemble anomaly detection (Z-score + pattern + rules)
+        ↓ anomaly > 0.7
+  RCA Agent             ← Service dependency graph traversal (13-node map)
+        ↓
+  Planning Agent        ← Template → Memory → Groq LLM → Fallback
+        ↓
+  SLA Agent             ← Priority scoring (P0–P4)
+        ↓
+  Decision Engine       ← Risk scoring → auto / notify / approve / block
+        ↓
+  Execution Agent       ← Runs steps (simulate / shadow / live mode)
+        ↓ failed → back to Planning (max 3 retries)
+  Feedback Agent        ← Stores fix → vector store + cache → RL score update
 ```
 
 ---
 
-## 2. The Agentic State Machine (LangGraph Orchestrator)
+## 2. What Is Real vs Simulated
 
-Unlike simple LangChain sequences which are DAGs (Directed Acyclic Graphs), an infrastructure outage resolution requires cyclical flows (e.g., trying a fix, failing, going back to plan a new fix). 
+### REAL (actually executes)
 
-### How State Mutates
-Every incident initialized by the orchestrator creates an instance of `IncidentState`. Agents execute asynchronously, pulling context from `IncidentState`. However, agents **cannot mutate** the global state directly. They return a *State Patch* which the orchestrator strictly merges. This guarantees thread safety and an immutable audit trail.
+| Component | What happens |
+|---|---|
+| **Groq LLM** | Real HTTPS API call to Groq cloud — generates actual remediation plan |
+| **Anomaly detection** | Real algorithm — Z-score, pattern matching, rule-based ensemble |
+| **Root cause analysis** | Real dependency graph traversal — 13-node service map with impact tracing |
+| **Risk scoring** | Real formula — blast radius, confidence, SLA, rollback, source |
+| **Decision routing** | Real logic — auto/notify/approve/block tier assignment |
+| **Command validation** | Real regex — blocks `kubectl delete namespace`, `rm -rf /`, `DROP TABLE` etc. |
+| **Human approval gate** | Real — waits for actual API call to `/api/v1/approvals/:id/decision` |
+| **Vector search** | Real TF-IDF cosine similarity — finds similar past incidents |
+| **Cache** | Real TTL cache — prevents duplicate LLM calls for same incident type |
 
-```mermaid
-stateDiagram-v2
-    [*] --> Idle
+### SIMULATED (hardcoded fake output)
 
-    state "Data Stream" as DS
-    Idle --> DS : "Consume Log"
-    
-    state "Monitor Agent" as MA
-    DS --> MA : "_evaluate_anomaly()_"
-    
-    MA --> Idle : "Anomaly < 0.7"
-    MA --> RCA_Agent : "Anomaly >= 0.7"
-    
-    state "RCA Agent" as RCA
-    RCA --> Planning_Agent : "Dependency Traced"
-    
-    state "Planning Agent" as Planner
-    Planner --> SLA_Agent : "Fix Generated"
-    
-    state "SLA Agent" as SLA
-    SLA --> Human_Gate : "P0 (Critical)"
-    SLA --> Execution_Agent : "P1-P4"
-    
-    state "Human Gate" as Gate
-    Gate --> Execution_Agent : "Approved"
-    Gate --> Idle : "Rejected"
-    
-    state "Execution Agent" as Exec
-    Exec --> Feedback_Agent : "Success"
-    Exec --> Planner : "Timeout / Failure (Retry)"
-    
-    state "Feedback Agent" as Feedback
-    Feedback --> [*] : "Resolution Stored"
+| Component | Where | What's fake |
+|---|---|---|
+| **Execution output** | `execution.agent.ts:69–80` | All kubectl/docker output is hardcoded strings |
+| **Step timing** | `execution.agent.ts:19–30` | Fake delays (`setTimeout`) — not real kubectl latency |
+| **5% failure rate** | `execution.agent.ts:49` | `Math.random() < 0.05` — not a real cluster failure |
+| **Raw events** | `simulator/log-producer.ts` | Generated fake Kubernetes events, not real cluster logs |
+
+**Execution modes:** `EXECUTION_MODE=simulate` (current) → `shadow` (dry-run on real cluster) → `live` (real execution).
+
+---
+
+## 3. Anomaly Detection (Monitoring Agent)
+
+Ensemble of three detectors — each contributes a weighted score:
+
+```
+anomalyScore = 0.3 × statisticalScore
+             + 0.4 × patternScore
+             + 0.3 × rulesScore
+```
+
+**Statistical score:** Z-score deviation on severity distribution and error event ratios.
+
+**Pattern score:** Matches known failure patterns:
+- `OOMKilled`, `CrashLoopBackOff`, `ImagePullBackOff`
+- Error rate spike, CPU saturation, disk full
+- Connection pool exhaustion, service unreachable
+
+**Rules score:**
+- Multiple critical events from same service
+- Rapid succession events (within 30 seconds)
+- Cascading failures across dependent services
+
+Threshold: `ANOMALY_THRESHOLD=0.7` — below this, events are silently dropped.
+
+---
+
+## 4. Planning Agent — Priority Chain
+
+```
+1. Template Service (deterministic, pre-validated — no LLM needed)
+     → 6 templates: CrashLoopBackOff, high memory, high CPU,
+       ImagePullBackOff, endpoints not ready, PVC not bound
+     → If template matches: confidence=0.95, riskLevel=low, done.
+
+2. Memory Service (past proven fixes via vector search + cache)
+     → Check Redis/InProcessCache for fingerprint (sha256 of service:type:severity)
+     → HIT: Return cached fix instantly
+     → MISS: Query TF-IDF vector store (similarity ≥ 0.82)
+     → Found: Return fix, write to cache, done.
+
+3. Groq LLM (only when 1 and 2 both miss)
+     → RAG: query vector store for similar incidents → inject as context
+     → Call llama-3.3-70b-versatile with structured JSON output
+     → Circuit breaker: 3 failures → 5-min bypass → auto-closes
+     → On GroqUnavailableError: fall through to step 4
+
+4. Fallback Plan (hardcoded category-based steps)
+     → memory_leak: scale_deployment + rolling_restart + update_resource_limits
+     → application_crash: rollback_deployment + verify_health
+     → resource_exhaustion: scale_deployment + verify_health
+     → default: restart_service + verify_health
+```
+
+**Exception:** `service_down` incidents skip steps 1 & 2 — always goes to Groq LLM for a fresh, context-aware plan.
+
+---
+
+## 5. Risk Scoring Engine
+
+```
+score = (blastRadius × 20)            // plan.riskLevel: critical=5, high=3, else=2
+      + (1 – confidence) × 30         // lower confidence = higher risk
+      + (critical severity ? +15 : 0) // SLA penalty for critical incidents
+      – (hasRollbackPlan ? 20 : 0)    // rollback = safer
+      – (template source ? 25 : 0)    // pre-validated = much safer
+      – (trustworthy memory ? 15 : 0) // 3+ successful past uses
+      – (untrusted memory ? 5 : 0)    // memory hit but unproven
+      clamped [0, 100]
+```
+
+**Tier assignment:**
+```
+score  0–34  → AUTO    execute immediately
+score 35–64  → NOTIFY  execute + Slack alert
+score 65–84  → APPROVE pause, wait for human
+score 85–100 → BLOCK   never executes, escalate
+```
+
+**Override rules (applied after scoring):**
+1. Command `REQUIRE_REVIEW` pattern found → tier bumped to `approve` minimum
+2. Command `HARD_BLOCKED` found → always `block`, score = 100
+3. Template + approve/block tier → downgraded to `notify` (pre-validated = safe)
+4. OOM kill (`pod_crash` + `memory_leak`) → score = 100, tier = `approve`
+
+**Hard-blocked commands (can never execute):**
+```
+kubectl delete namespace
+kubectl delete --all
+DROP TABLE / DROP DATABASE
+DELETE FROM (without WHERE)
+rm -rf /
+chmod 777 /
+curl ... | bash
 ```
 
 ---
 
-## 3. Ingestion & Anomaly Detection Flow
+## 6. In-Process Services (No-Docker Architecture)
 
-### The Mathematics Behind Detection
-If we relied on hardcoded thresholds (e.g., `Memory > 90%`), the system would suffer from alert fatigue because normal traffic spikes trigger false alarms.
+### Vector Store (ChromaDB replacement)
 
-1. **Ingestion Buffer:** Kafka streams push to the Fastify consumer. To prevent an event loop crash under heavy traffic, events are buffered in memory blocks.
-2. **Feature Extraction:** Non-numerical logs are vectorized structurally. The time delta from the last spike is calculated.
-3. **Isolation Forest Model:** 
-    - The ML engine evaluates new events in real-time against an active tree. 
-    - *Calculation:* The fewer nodes an event must pass through to be "isolated" from normal traffic clusters, the more anomalous it is.
-4. **Temporal Decay Tracking:** The isolation score is combined with a time-decay weight $W = e^{-\lambda t}$. This deduplicates rapid error spams (preventing 10 alerts for the same repeating error).
+File: `src/services/chroma.client.ts`
 
-```mermaid
-sequenceDiagram
-    participant Kafka Topic
-    participant Fastify Node
-    participant ML Isolation Forest
-    participant StateGraph
-    
-    Kafka Topic->>Fastify Node: Stream raw JSON logs (Batch 500)
-    Fastify Node->>Fastify Node: Backpressure logic (Check Event Loop Lag)
-    Fastify Node->>ML Isolation Forest: Extract numerical features (CPU, Latency, Errors)
-    ML Isolation Forest-->>Fastify Node: Return Anomaly Score (e.g., 0.85)
+- TF-IDF (Term Frequency–Inverse Document Frequency) cosine similarity
+- Incident descriptions tokenized → TF-IDF vectors → cosine distance
+- `storeIncident(id, document, metadata)` — adds to in-memory array
+- `querySimilarIncidents(queryText, topK)` — returns sorted by distance (lower = closer)
+- Inspect live contents: `GET /api/debug/stores`
 
-    alt Score >= 0.7
-        Fastify Node->>StateGraph: TRIGGER: instantiate `IncidentState`
-    else Score < 0.7
-        Fastify Node->>Fastify Node: Drop / Log silently
-    end
-```
+### Cache (Redis replacement)
 
----
+File: `src/services/memory.service.ts` → `InProcessCache`
 
-## 4. Problem Solving Flow: RAG Query & Planning
+- `Map<key, { value, expiresAt }>` — entries auto-expire on read
+- 30-minute TTL per cached fix
+- Key = `fix:` + SHA-256 fingerprint(service:incidentType:severity)[0:16]
+- Populated by `memoryService.storeFix()` after every resolved incident
 
-Once the Root Cause tracking is finished, the **Planning Agent** leverages ChromaDB (Retrieval-Augmented Generation) and Groq LLaMA 3 70B for zero-latency semantic reasoning.
+### Event Bus (Kafka replacement)
 
-### The RAG Mechanism Steps:
-1. **Stringification:** The RCA agent outputs a JSON report. This report is stringified into a narrative text block (`"Service A crashed due to downstream timeout scaling from DB connection limit..."`).
-2. **Embedding:** We utilize local or embedded models to convert this narrative into a 1536-dimensional vector float array.
-3. **ChromaDB K-NN:** The array is cross-referenced using Cosine Similarity against all past incidents.
-4. **Prompt Building:** 
-    - *System Prompt:* "You are a senior DevOps engineer."
-    - *Context Window:* Pre-loads the top 3 resolutions that previously solved similar mathematical embeddings.
-    - *Current Outage:* Appends the current live data.
-5. **Deterministic Schema:** The Groq API is forced to respond only in a structured `Zod` output format (strictly enforcing `Array<FixStep>`).
+File: `src/services/kafka.service.ts`
 
-```mermaid
-flowchart LR
-    A["RCA Report JSON"] --> B("Embedding Generator")
-    B --> |"1D Vector Float"| C[("ChromaDB Cluster")]
-    C -- "Cosine Sim: >0.82" --> D["Top 3 Historic Fixes"]
-    
-    D --> E{Prompt Compiler}
-    A --> E
-    
-    E --> F(("LLaMA 3 (Groq LPU)"))
-    F --> |"Structured JSON"| G["Zod Schema Validator"]
-    
-    G -- "Valid" --> H["Planning Agent Phase Complete"]
-    G -- "Hallucination" --> E
-```
+- Node.js `EventEmitter` with topic `autoops.raw-events`
+- `subscribeAndConsume(topic, handler)` → `bus.on(topic, handler)`
+- `publishEvents(topic, events)` → `bus.emit(topic, events)`
+- Wired in `POST /api/simulate` — events flow through bus AND pipeline simultaneously
 
 ---
 
-## 5. Safely Executing Fixes (The Constraint Flow)
+## 7. Human Approval Gate
 
-Allowing an AI execution engine uncontrolled root terminal access is an enterprise disaster waiting to happen. AutoOps prevents chaos utilizing a **Template-Based Fix Engine**.
+When risk tier is `approve` or `block`:
 
-### How safe execution is guaranteed:
-Instead of generating generic bash commands (`#!/bin/bash sudo rm ...`), the LLM only suggests an intent and specifies template parameters.
-
-1. **Semantic Match:** LLM recommends `intent: "RESTART_POD", target: "auth-service"`.
-2. **Template Expansion:** The execution engine maps this to an internal, highly audited constant string: `kubectl rollout restart deployment/{{target}} -n production`.
-3. **Regex Validator:** The parameters pass a strict validator checking for command injection (e.g., ensuring `target` doesn't contain `; rm -rf /`).
-4. **SLA Gating Check:** If the SLA agent flagged this as a critical path, the execution pauses and sends a WebSocket payload to the Front-End Dashboard. An Admin must click "Approve" (calling the Fastify `approvals.router.ts`), unblocking the StateGraph promise.
-5. **Node.js Spawn/Exec:** The `child_process.exec` physically patches the environment.
-
-```mermaid
-sequenceDiagram
-    participant LLM Output
-    participant Execution Engine
-    participant Security Validator
-    participant Approval Router
-    participant Docker/K8s Env
-    
-    LLM Output->>Execution Engine: intent: "SCALE_UP", {target: "db", max: 5}
-    Execution Engine->>Security Validator: Map to Template: "kubernetes_scale"
-    Security Validator-->>Execution Engine: Param Validation: OK
-    
-    Execution Engine->>Approval Router: Check SLA Agent Flag
-    
-    alt P0 / High Danger
-        Approval Router->>Execution Engine: PAUSE (Await Callback)
-        Approval Router->>UI: Request User Signature
-        UI-->>Approval Router: HTTP POST /api/approvals (Grant)
-        Approval Router->>Execution Engine: UNPAUSE
-    end
-    
-    Execution Engine->>Docker/K8s Env: Execute Restrictive Command
-    Docker/K8s Env-->>Execution Engine: Exit Code 0 (Success)
 ```
+1. Decision Engine returns { action: "escalate_human" }
+2. Workflow calls ApprovalService.createRequest()
+   → Creates record in approvals store
+   → Broadcasts "approval_required" to all WebSocket clients
+   → Dashboard shows approval buttons immediately
+3. Workflow polls DB every 5 seconds for decision
+4. Timeout: 10 minutes (APPROVAL_TIMEOUT_MS=600000)
+5. Human calls POST /api/v1/approvals/:id/decision
+   → { decision: "APPROVED", approverId: "...", comment: "..." }
+6. Workflow detects decision → proceeds to execution (or terminates)
+```
+
+**Grouping:** Multiple incidents for the same service+namespace within 5 minutes are grouped into one approval request.
 
 ---
 
-## 6. Feedback Loop (Continuous Maturation)
+## 8. Feedback Loop & Learning
 
-The final agent in the StateGraph is the **Feedback Agent**.
-It evaluates the success of the execution (did latency drop? Did errors stop?).
+After every resolved incident, `feedbackAgent` stores the fix so future identical incidents use cache instead of LLM:
 
-If the execution succeeded:
-- The exact state graph inputs, vectors, and execution logs are fed back into ChromaDB.
-- This creates semantic density. The next time a similar incident arises, the vectors will cluster more tightly, granting higher confidence to the prompt injection.
-- Over time, MTTR (Mean Time To Recovery) approaches $T_{execution}$, as the planning phase converges instantly onto historic truth.
+```typescript
+// 1. Store in vector store for semantic retrieval
+storeIncident(fixId, descriptionText, metadata);
+
+// 2. Store in DB (stored_fixes table) with RL score
+db.query("INSERT INTO stored_fixes ...", [fixId, incidentType, errorSignature, fixSteps, 0.5, 0, 0]);
+
+// 3. Write to Redis/InProcessCache (30-min TTL)
+redis.set("fix:" + fingerprint, JSON.stringify(storedFix), "EX", 1800);
+
+// 4. Update RL score after execution (fire-and-forget)
+newScore = 0.7 × oldScore + 0.3 × reward
+// reward: success + SLA met = 1.0, success + SLA missed = 0.6, failure = 0.1
+```
+
+After 3+ successful uses (`TRUST_THRESHOLD_SUCCESS_COUNT=3`), the fix becomes **trustworthy** → risk score drops by 15 points → more likely to auto-execute without human approval.
+
+---
+
+## 9. Metrics & Observability
+
+**Prometheus endpoint:** `GET /api/prometheus` — standard Prometheus text format.
+
+**Persistence:** Metrics written to `metrics.json` on every pipeline event. Loaded on startup so restarts don't lose historical data.
+
+**In-process metrics tracked:**
+```
+incidentsTotal       autoResolutionRate    avgMttrSeconds
+incidentsResolved    incidentsFailed       incidentsEscalated
+incidentsActive      totalMttrMs           resolvedCount
+```
+
+**WebSocket:** Every agent state change broadcasts a real-time event to connected dashboard clients. New clients receive a replay of any pending approval so they never miss a waiting decision.
+
+---
+
+## 10. Corporate SSL Fix
+
+Enterprise lab environments use SSL inspection proxies that re-sign HTTPS traffic with a corporate CA. Node.js rejects these connections by default (`unable to get local issuer certificate`).
+
+**Fix in `start.ps1`:**
+```powershell
+# Export 52 Windows trusted root CAs to PEM
+Get-ChildItem Cert:\LocalMachine\Root | ForEach-Object {
+    # ... export each cert to PEM format
+}
+# Tell Node.js to trust them
+$env:NODE_EXTRA_CA_CERTS = "$PSScriptRoot\corporate-ca.pem"
+```
+
+This is the **secure** fix — adds your corporate CA to Node.js's trust store. Does not disable SSL verification.

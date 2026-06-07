@@ -147,7 +147,9 @@ export async function planningAgent(state: IncidentState): Promise<IncidentState
     };
 
     // Priority 1: Deterministic templates (most reliable, no LLM needed)
-    const templateFix = templateService.findTemplate(incidentContext);
+    // service_down always goes to Groq LLM — no template/memory cache
+    const skipCache = incidentContext.incidentType === "service_down";
+    const templateFix = skipCache ? null : templateService.findTemplate(incidentContext);
     if (templateFix) {
         state.plan = {
             planId: `plan-tpl-${uuidv4().slice(0, 8)}`,
@@ -176,7 +178,9 @@ export async function planningAgent(state: IncidentState): Promise<IncidentState
 
     // Priority 2: Vector memory retrieval (reuse proven past fixes)
     try {
-        const memoryResult = await memoryService.queryMemory(incidentContext);
+        const memoryResult = skipCache
+            ? { fix: null, similarity: 0, source: "none" as const, trustworthy: false }
+            : await memoryService.queryMemory(incidentContext);
         if (memoryResult.fix && memoryResult.source !== "none") {
             state.plan = {
                 planId: `plan-mem-${uuidv4().slice(0, 8)}`,

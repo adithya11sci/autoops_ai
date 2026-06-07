@@ -28,38 +28,46 @@ const TRUST_THRESHOLD = parseInt(
 );
 const TIEBREAKER_RANGE = 0.02;
 
-import { Redis } from "ioredis";
+// ── In-process TTL cache (replaces Redis — no Docker required) ──
 
-// ── Redis Cache Service ──
-let redisAvailable = true;
-const redis = new Redis({
-    host: process.env.REDIS_HOST || "localhost",
-    port: parseInt(process.env.REDIS_PORT || "6379"),
-    maxRetriesPerRequest: 1,
-    enableOfflineQueue: false,
-    lazyConnect: true,
-    retryStrategy: (times: number) => {
-        if (times >= 3) {
-            // Stop retrying after 3 attempts — Redis is not available
-            redisAvailable = false;
-            return null; // null = stop retrying
+const CACHE_TTL_SEC = 30 * 60; // 30 minutes
+
+class InProcessCache {
+    private store = new Map<string, { value: string; expiresAt: number }>();
+
+    async get(key: string): Promise<string | null> {
+        const entry = this.store.get(key);
+        if (!entry) return null;
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return null;
         }
-        return Math.min(times * 500, 2000);
-    },
-});
-
-let redisErrLogged = false;
-redis.on("error", () => {
-    if (!redisErrLogged) {
-        log.warn("Redis not available — memory service using ChromaDB only (this is non-fatal)");
-        redisErrLogged = true;
+        return entry.value;
     }
-    redisAvailable = false;
-});
 
-redis.connect().catch(() => { /* handled by error event */ });
+    async set(key: string, value: string, _exMode?: string, ttlSec?: number): Promise<void> {
+        const expiresAt = Date.now() + (ttlSec ?? CACHE_TTL_SEC) * 1000;
+        this.store.set(key, { value, expiresAt });
+    }
 
-const CACHE_TTL_SEC = 30 * 60; // 30 minutes in seconds
+    size(): number { return this.store.size; }
+
+    snapshot(): Array<{ key: string; ttlSeconds: number; preview: string }> {
+        const now = Date.now();
+        return Array.from(this.store.entries())
+            .filter(([, e]) => now <= e.expiresAt)
+            .map(([key, e]) => ({
+                key,
+                ttlSeconds: Math.round((e.expiresAt - now) / 1000),
+                preview: e.value.slice(0, 120) + (e.value.length > 120 ? "…" : ""),
+            }));
+    }
+}
+
+export const redis = new InProcessCache();
+const redisAvailable = true;
+
+log.info("In-process cache initialised (Redis replacement — no Docker required)");
 
 export class MemoryService {
     /**

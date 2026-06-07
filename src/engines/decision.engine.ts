@@ -154,65 +154,14 @@ export class DecisionEngine {
             }
 
             case "approve": {
-                try {
-                    const approvalId = await this.approvalService.createRequest(
-                        fixPlan,
-                        riskAssessment,
-                        incidentId,
-                        incidentContext.affectedService,
-                        incidentContext.namespace || "default",
-                        state.fixId ?? null
-                    );
-                    state.approvalId = approvalId;
-
-                    const decision = await this.approvalService.waitForDecision(approvalId);
-
-                    if (decision === "approved") {
-                        const result: DecisionResult = {
-                            action: "execute",
-                            reason: "Human approved",
-                            auditNote: `Approved via approval ${approvalId}`,
-                        };
-                        await this.logDecision(incidentId, state.fixId ?? null, fixSource, riskAssessment.score, riskAssessment.tier, "execute", "human_approved");
-                        return result;
-                    }
-
-                    if (decision === "denied") {
-                        const result: DecisionResult = {
-                            action: "block",
-                            reason: "Human denied the fix plan",
-                        };
-                        await this.logDecision(incidentId, state.fixId ?? null, fixSource, riskAssessment.score, riskAssessment.tier, "block", "human_denied");
-                        return result;
-                    }
-
-                    // Timeout
-                    if (riskAssessment.score >= 75) {
-                        const result: DecisionResult = {
-                            action: "block",
-                            reason: "Approval timeout, high risk — blocking execution",
-                        };
-                        await this.logDecision(incidentId, state.fixId ?? null, fixSource, riskAssessment.score, riskAssessment.tier, "block", "timeout_high_risk");
-                        return result;
-                    } else {
-                        const result: DecisionResult = {
-                            action: "execute_notify",
-                            reason: "Approval timeout, medium risk — proceeding with notification",
-                            slackMessage: `⚠️ Approval timeout for incident ${incidentId}. Risk score ${riskAssessment.score} < 75. Proceeding with execution.`,
-                        };
-                        await this.logDecision(incidentId, state.fixId ?? null, fixSource, riskAssessment.score, riskAssessment.tier, "execute_notify", "timeout_medium_risk");
-                        return result;
-                    }
-                } catch (err: unknown) {
-                    const error = err as Error;
-                    log.error({ error: error.message, incidentId }, "Approval flow failed");
-                    // On approval service failure, block for safety
-                    const result: DecisionResult = {
-                        action: "block",
-                        reason: `Approval service error: ${error.message}`,
-                    };
-                    return result;
-                }
+                // Hand off to the workflow's broadcast-wired approval gate so the UI
+                // shows the risk score and approval buttons immediately.
+                const result: DecisionResult = {
+                    action: "escalate_human",
+                    reason: `Risk score ${riskAssessment.score}/100 requires human approval — ${riskAssessment.reasons[riskAssessment.reasons.length - 1]}`,
+                };
+                await this.logDecision(incidentId, state.fixId ?? null, fixSource, riskAssessment.score, riskAssessment.tier, "escalate_human", "approve_tier");
+                return result;
             }
 
             case "notify": {
