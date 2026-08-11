@@ -618,6 +618,10 @@ const uiState = {
   triggerBtn: null,
   pipelineRunning: false,
   pendingApprovalId: null,
+  // 'server' = persistent process with a live WebSocket feed.
+  // 'serverless' = Vercel; no WS, so /api/simulate returns the whole transcript
+  // at once and we replay it locally to drive the same UI.
+  runtime: 'server',
 };
 
 // ── Clock ──────────────────────────────────────────────────
@@ -721,6 +725,13 @@ async function submitApproval(decision) {
 
 // ── WebSocket ──────────────────────────────────────────────
 function connectWs() {
+  // Serverless has no WebSocket endpoint — don't burn reconnect attempts on it.
+  if (uiState.runtime === 'serverless') {
+    setConnStatus('batch');
+    addLog('system', 'warn', 'Serverless runtime — real-time feed unavailable; results stream in when each run finishes');
+    return;
+  }
+
   setConnStatus('connecting');
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${proto}//${location.host}/ws`;
@@ -759,8 +770,10 @@ function scheduleReconnect() {
 function setConnStatus(status) {
   const dot = document.getElementById('conn-dot');
   const label = document.getElementById('conn-label');
-  dot.className = `conn-dot ${status}`;
-  label.textContent = status === 'connected' ? 'Live' : status === 'connecting' ? 'Connecting...' : 'Disconnected';
+  // 'batch' reuses the connected dot styling — the API works, only the live feed is absent.
+  dot.className = `conn-dot ${status === 'batch' ? 'connected' : status}`;
+  const labels = { connected: 'Live', connecting: 'Connecting...', batch: 'Batch (serverless)' };
+  label.textContent = labels[status] || 'Disconnected';
 }
 
 // ── Message Handler ────────────────────────────────────────
@@ -1252,9 +1265,46 @@ async function trigger(scenario, btn) {
       uiState.activeIncidentId = data.incidentId;
       addLog('system', 'info', `Pipeline started: ${data.incidentId}`);
     }
+
+    // Serverless: the pipeline already ran to completion inside that request and
+    // the messages the WebSocket would have streamed came back in the body.
+    if (Array.isArray(data.transcript)) {
+      await replayTranscript(data.transcript);
+      if (data.metrics) updateMetricsDisplay(data.metrics);
+      loadIncidents();
+    }
   } catch (err) {
     addLog('system', 'error', `Failed to trigger: ${err.message}`);
     enableScenarioButtons();
+  }
+}
+
+/**
+ * Feed a captured transcript through the normal message handler, paced so the UI
+ * animates instead of snapping to the final state. Total replay is capped so a
+ * long run doesn't leave the operator watching a progress bar.
+ */
+async function replayTranscript(messages) {
+  if (!messages.length) {
+    addLog('system', 'warn', 'Run finished but returned no transcript');
+    enableScenarioButtons();
+    return;
+  }
+
+  const REPLAY_BUDGET_MS = 4000;
+  const delay = Math.min(50, Math.floor(REPLAY_BUDGET_MS / messages.length));
+
+  for (const msg of messages) {
+    try { handleMessage(msg); } catch (err) { console.error('Replay error', err); }
+    if (delay > 0) await new Promise(r => setTimeout(r, delay));
+  }
+
+  // Guard against a transcript that ended without a pipeline_complete (e.g. the
+  // function hit its time limit mid-run) leaving the buttons stuck.
+  if (uiState.pipelineRunning) {
+    addLog('system', 'warn', 'Run ended without a completion event — re-enabling controls');
+    enableScenarioButtons();
+    uiState.pipelineRunning = false;
   }
 }
 
@@ -1353,16 +1403,18 @@ async function loadSystemInfo() {
     if (data.services && data.services.executionMode) {
       document.getElementById('exec-mode').textContent = data.services.executionMode + ' mode';
     }
-  } catch { /* ignore */ }
+    if (data.runtime) uiState.runtime = data.runtime;
+  } catch { /* ignore — assume a normal server and let the WS attempt decide */ }
 }
 
 // ── Init ───────────────────────────────────────────────────
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   initClock();
+  // Resolve the runtime first so connectWs knows whether /ws exists at all.
+  await loadSystemInfo();
   connectWs();
   loadMetrics();
   loadIncidents();
-  loadSystemInfo();
 
   // Refresh metrics & incidents periodically
   setInterval(loadMetrics, 30000);

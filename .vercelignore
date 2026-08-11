@@ -1,0 +1,28 @@
+# Build artifacts / deps (Vercel installs and builds its own)
+node_modules
+dist
+*.log
+.run.log
+
+# Secrets and local-only config — env vars belong in the Vercel dashboard
+.env
+.env.docker
+corporate-ca.pem
+
+# Local orchestration, not used by the serverless deployment
+docker-compose.yml
+Dockerfile
+start.sh
+start.ps1
+start.bat
+docker.bat.disabled
+go-ingester
+simulation
+
+# Docs and scratch reports
+docs
+*.md
+!README.md
+lint_output.txt
+status.txt
+status2.txt

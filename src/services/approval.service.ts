@@ -4,6 +4,7 @@
  * Handles incident grouping to prevent alert fatigue.
  */
 import { createChildLogger } from "../utils/logger";
+import { isServerless } from "../config";
 import { getPool } from "./database";
 import {
     FixPlan,
@@ -106,6 +107,17 @@ export class ApprovalService {
      * Polls PostgreSQL every 5 seconds, times out after APPROVAL_TIMEOUT_MS.
      */
     async waitForDecision(approvalId: string): Promise<"approved" | "denied" | "timeout"> {
+        // Serverless: approvals live in per-instance memory and the decision POST is a
+        // separate invocation that won't share it, so the poll below could never observe
+        // an approval. Fail closed immediately — the caller escalates on "timeout".
+        if (isServerless) {
+            log.warn(
+                { approvalId },
+                "Serverless runtime — human approval gate unavailable; escalating instead of waiting"
+            );
+            return "timeout";
+        }
+
         const startTime = Date.now();
         const pollIntervalMs = 5000;
 

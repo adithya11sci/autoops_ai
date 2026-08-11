@@ -1,11 +1,24 @@
+import os from "os";
 import dotenv from "dotenv";
 dotenv.config();
+
+/**
+ * True when running inside a serverless function (Vercel).
+ * Serverless has no persistent process, so WebSockets, background work after
+ * the response is sent, and cross-request in-memory state are all unavailable.
+ * Modules branch on this instead of sniffing process.env.VERCEL directly.
+ */
+export const isServerless = !!process.env.VERCEL;
+
+/** Writable scratch directory — the Vercel filesystem is read-only except /tmp. */
+export const writableDir = isServerless ? os.tmpdir() : process.cwd();
 
 export const config = {
     server: {
         port: parseInt(process.env.PORT || "3000"),
         host: process.env.HOST || "0.0.0.0",
         env: process.env.NODE_ENV || "development",
+        serverless: isServerless,
     },
     groq: {
         apiKey: process.env.GROQ_API_KEY || "",

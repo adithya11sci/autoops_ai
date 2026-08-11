@@ -8,7 +8,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import fastifyWebsocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
-import { config } from "../config";
+import { config, isServerless } from "../config";
 import { createChildLogger } from "../utils/logger";
 import {
     runPipeline,
@@ -26,6 +26,8 @@ import {
     getClientCount,
     getPrometheusMetrics,
     getMetricsJson,
+    beginCapture,
+    endCapture,
 } from "../services/broadcast";
 import { publishEvents, bus } from "../services/kafka.service";
 import { getVectorStoreSnapshot } from "../services/chroma.client";
@@ -55,27 +57,40 @@ export async function createServer() {
 
     // ── Plugins ─────────────────────────────────────────
     await app.register(cors, { origin: true });
-    await app.register(fastifyWebsocket);
 
-    // Serve the enterprise dashboard UI
-    try {
-        await app.register(fastifyStatic, {
-            root: path.join(process.cwd(), "public"),
-            prefix: "/",
-            decorateReply: true,
-        });
-    } catch (err: any) {
-        log.warn({ err: err.message }, "Static file serving not available");
+    // Serverless functions never receive an HTTP upgrade, so the WS plugin and the
+    // /ws route below are skipped there; the UI falls back to inline transcripts.
+    if (!isServerless) {
+        await app.register(fastifyWebsocket);
+    }
+
+    // Serve the enterprise dashboard UI.
+    // On Vercel the platform serves public/ as static assets and this function only
+    // ever sees /api/* requests, so the static plugin is dead weight there.
+    let staticEnabled = false;
+    if (!isServerless) {
+        try {
+            await app.register(fastifyStatic, {
+                root: path.join(process.cwd(), "public"),
+                prefix: "/",
+                decorateReply: true,
+            });
+            staticEnabled = true;
+        } catch (err: any) {
+            log.warn({ err: err.message }, "Static file serving not available");
+        }
     }
 
     await registerApprovalRoutes(app);
 
     // ── WebSocket: Real-time Event Stream ────────────────
-    app.get("/ws", { websocket: true }, (connection: any) => {
-        const ws = connection.socket || connection;
-        addWsClient(ws);
-        log.info({ clients: getClientCount() }, "WS client connected");
-    });
+    if (!isServerless) {
+        app.get("/ws", { websocket: true }, (connection: any) => {
+            const ws = connection.socket || connection;
+            addWsClient(ws);
+            log.info({ clients: getClientCount() }, "WS client connected");
+        });
+    }
 
     // ── Health Check ─────────────────────────────────────
     app.get("/api/health", async () => ({
@@ -83,9 +98,13 @@ export async function createServer() {
         version: "2.0.0",
         uptime: Math.round(process.uptime()),
         timestamp: new Date().toISOString(),
+        // The dashboard reads `runtime` to decide between the WS live feed and
+        // the serverless inline-transcript fallback.
+        runtime: isServerless ? "serverless" : "server",
+        realtime: isServerless ? "inline" : "websocket",
         services: {
             api: "running",
-            websocket: `${getClientCount()} clients`,
+            websocket: isServerless ? "unavailable (serverless)" : `${getClientCount()} clients`,
             executionMode: config.agents.executionMode,
         },
     }));
@@ -124,6 +143,33 @@ export async function createServer() {
 
             // Pre-register so the incident is queryable immediately
             preRegisterIncident(state);
+
+            // Serverless: the function is frozen the moment the response is sent, so
+            // deferred work never finishes. Run the pipeline inline and ship the
+            // transcript the WebSocket would have streamed back in the response body.
+            if (isServerless) {
+                const buffer = beginCapture();
+                try {
+                    await publishEvents(config.kafka.topics.rawEvents, events).catch(() => {});
+                    await runPipeline(events, state);
+                } catch (err: any) {
+                    log.error({ err: err.message }, "Inline pipeline error");
+                } finally {
+                    endCapture(buffer);
+                }
+
+                return reply.code(200).send({
+                    incidentId: state.incidentId,
+                    status: "complete",
+                    scenario,
+                    eventCount: events.length,
+                    outcome: state.outcome,
+                    workflowStatus: state.workflowStatus,
+                    // Replayed client-side to drive the same UI as the live feed
+                    transcript: buffer,
+                    metrics: getMetricsJson(),
+                });
+            }
 
             // Publish through in-process event bus (mirrors Kafka flow) + run pipeline
             setImmediate(() => {
@@ -273,6 +319,9 @@ export async function createServer() {
             return reply.code(404).send({ error: "Not found" });
         }
         // For UI routes, try sending index.html
+        if (!staticEnabled) {
+            return reply.code(404).send("Not found");
+        }
         try {
             return reply.sendFile("index.html");
         } catch {

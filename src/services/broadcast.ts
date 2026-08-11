@@ -6,10 +6,12 @@
 import fs from "fs";
 import path from "path";
 import { createChildLogger } from "../utils/logger";
+import { writableDir } from "../config";
 
 const log = createChildLogger("Broadcast");
 
-const METRICS_FILE = path.join(process.cwd(), "metrics.json");
+// On Vercel the project directory is read-only; writableDir points at /tmp there.
+const METRICS_FILE = path.join(writableDir, "metrics.json");
 
 interface WsClient {
     readyState: number;
@@ -63,6 +65,32 @@ export function clearPendingApproval(): void {
     pendingApproval = null;
 }
 
+// ── Capture buffer (serverless) ───────────────────
+// With no WebSocket available, a serverless request runs the pipeline inline and
+// hands the browser the messages it would have streamed. Capture is refcounted so
+// concurrent captures each get the full transcript of their own request.
+
+export interface CapturedMessage {
+    type: string;
+    payload: unknown;
+    ts: number;
+}
+
+const captures = new Set<CapturedMessage[]>();
+
+/** Start collecting broadcast messages. Returns the buffer to pass to endCapture. */
+export function beginCapture(): CapturedMessage[] {
+    const buffer: CapturedMessage[] = [];
+    captures.add(buffer);
+    return buffer;
+}
+
+/** Stop collecting and return everything captured on that buffer. */
+export function endCapture(buffer: CapturedMessage[]): CapturedMessage[] {
+    captures.delete(buffer);
+    return buffer;
+}
+
 // ── Client Management ─────────────────────────────
 
 export function addWsClient(socket: WsClient): void {
@@ -105,10 +133,20 @@ export function getClientCount(): number {
 
 // ── Broadcasting ──────────────────────────────────
 
+const MAX_CAPTURED_MESSAGES = 2000;
+
 export function broadcast(type: string, payload: unknown): void {
+    const ts = Date.now();
+
+    // Feed any active capture buffers before the no-clients short-circuit —
+    // in serverless there are never WS clients, but the transcript still matters.
+    for (const buffer of captures) {
+        if (buffer.length < MAX_CAPTURED_MESSAGES) buffer.push({ type, payload, ts });
+    }
+
     if (clients.size === 0) return;
 
-    const msg = JSON.stringify({ type, payload, ts: Date.now() });
+    const msg = JSON.stringify({ type, payload, ts });
     const dead: WsClient[] = [];
 
     for (const client of clients) {
